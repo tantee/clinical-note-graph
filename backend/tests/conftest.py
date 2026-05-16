@@ -71,6 +71,7 @@ class FakeStore:
             },
         }
         self.embeddings: list[dict] = []
+        self.pricing: dict[str, dict] = {}
 
     def execute(self, sql: str, params: dict[str, Any]) -> FakeResult:
         s = sql.lower()
@@ -118,9 +119,21 @@ class FakeStore:
             return FakeResult([])
         if s.startswith("insert into ai_outputs"):
             self.ai_outputs.append({
-                "document_id": params["d"], "patient_id": params["p"],
-                "model": params["m"], "raw_output": json.loads(params["r"]),
-                "valid": params["v"], "validation_errors": json.loads(params["e"]),
+                "id": f"ai-{len(self.ai_outputs)}",
+                "document_id": params.get("d"), "patient_id": params.get("p"),
+                "model": params.get("m"),
+                "raw_output": json.loads(params["r"]) if isinstance(params.get("r"), str) else (params.get("r") or {}),
+                "valid": params.get("v"),
+                "validation_errors": json.loads(params["e"]) if isinstance(params.get("e"), str) else (params.get("e") or []),
+                "job_id": params.get("job_id"),
+                "call_type": params.get("call_type"),
+                "prompt_tokens": params.get("prompt_tokens"),
+                "completion_tokens": params.get("completion_tokens"),
+                "total_tokens": params.get("total_tokens"),
+                "latency_ms": params.get("latency_ms"),
+                "cost_usd": params.get("cost_usd"),
+                "error": params.get("err"),
+                "created_at": "now",
             })
             return FakeResult([])
         if s.startswith("insert into audit_log"):
@@ -135,14 +148,40 @@ class FakeStore:
                 "job_id": params["jid"], "type": params["t"], "status": "pending",
                 "patient_id": params.get("pid"), "document_id": params.get("did"),
                 "payload": json.loads(params["p"]),
+                "attempts": 0, "max_attempts": 3,
+                "locked_by": None, "locked_until": None,
+                "priority": 0, "next_run_at": "now",
+                "progress": {},
             }
             return FakeResult([])
         if s.startswith("update jobs"):
-            row = self.jobs.get(params["jid"])
-            if row:
+            job_id = params.get("jid") or params.get("j")
+            row = self.jobs.get(job_id)
+            if row is None:
+                return FakeResult([])
+            if "set progress" in s:
+                row["progress"] = json.loads(params["p"]) if isinstance(params.get("p"), str) else (params.get("p") or {})
+                return FakeResult([])
+            if "status='pending'" in s or "status = 'pending'" in s:
+                # requeue path (Task 9)
+                row["status"] = "pending"
+                row["attempts"] = 0
+                row["error"] = None
+                row["locked_by"] = None
+                row["locked_until"] = None
+                return FakeResult([])
+            if "set status" in s:
                 row["status"] = params["st"]
-                if params.get("res"): row["result"] = json.loads(params["res"])
-                if params.get("err"): row["error"] = params["err"]
+                if params.get("res") is not None:
+                    row["result"] = json.loads(params["res"])
+                if params.get("err") is not None:
+                    row["error"] = params["err"]
+                if params.get("nxt") is not None:
+                    row["next_run_at"] = params["nxt"]
+                if "running" not in (params.get("st") or ""):
+                    row["locked_by"] = None
+                    row["locked_until"] = None
+                return FakeResult([])
             return FakeResult([])
         if s.startswith("insert into app_config"):
             self.config[params["k"]] = json.loads(params["v"])
@@ -160,6 +199,26 @@ class FakeStore:
             for p in rows:
                 self.embeddings.append({"patient_id": p["p"], "ref_type": p["rt"], "ref_id": p["ri"], "content": p["c"]})
             return FakeResult([])
+        if s.startswith("insert into model_pricing"):
+            m = params["m"]
+            cur = self.pricing.get(m, {})
+            self.pricing[m] = {
+                "model": m,
+                "prompt_per_1m": params.get("p") if params.get("p") is not None else cur.get("prompt_per_1m"),
+                "completion_per_1m": params.get("c") if params.get("c") is not None else cur.get("completion_per_1m"),
+                "embedding_per_1m": params.get("e") if params.get("e") is not None else cur.get("embedding_per_1m"),
+                "source": params.get("src", "manual"),
+                "updated_at": "now",
+            }
+            return FakeResult([])
+        if s.startswith("delete from model_pricing"):
+            self.pricing.pop(params["m"], None)
+            return FakeResult([])
+        if "from model_pricing" in s:
+            if "where model" in s and params.get("m") is not None:
+                row = self.pricing.get(params["m"])
+                return FakeResult([row] if row else [])
+            return FakeResult(sorted(self.pricing.values(), key=lambda r: r["model"]))
 
         # SELECTs
         if "select" in s and " from patients" in s:
@@ -242,6 +301,8 @@ def fake_store(monkeypatch):
     monkeypatch.setattr(export_mod, "db_session", _db_session)
     import app.services.runtime_config as rc_mod
     monkeypatch.setattr(rc_mod, "db_session", _db_session)
+    import app.services.pricing as pricing_mod
+    monkeypatch.setattr(pricing_mod, "db_session", _db_session)
     import app.routers.config as cfg_router
     monkeypatch.setattr(cfg_router, "db_session", _db_session)
     import app.routers.patient as p_router

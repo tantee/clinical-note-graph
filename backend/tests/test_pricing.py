@@ -41,3 +41,26 @@ def test_compute_cost_quantizes_to_six_dp():
     c = compute_cost(rates, prompt_tokens=1234, completion_tokens=567)
     # exact: (1234/1e6)*0.15 + (567/1e6)*0.6 = 0.0001851 + 0.0003402 = 0.0005253
     assert c == Decimal("0.000525")  # round-half-even at 6dp
+
+
+def test_upsert_load_and_list_via_fake_store(fake_store):
+    from app.services.pricing import list_rates, load_rates, upsert_rate, delete_rate
+
+    upsert_rate(model="acme/super-llm", prompt_per_1m=1.23, completion_per_1m=4.56, source="manual")
+    rows = list_rates()
+    assert any(r["model"] == "acme/super-llm" for r in rows)
+
+    loaded = load_rates("acme/super-llm")
+    assert loaded is not None
+    # rates come back; types are whatever the fake stored, which is fine — values match.
+    assert float(loaded["prompt_per_1m"]) == 1.23
+    assert float(loaded["completion_per_1m"]) == 4.56
+
+    # NULL component preserves existing value (COALESCE-style)
+    upsert_rate(model="acme/super-llm", prompt_per_1m=9.99)  # completion left None
+    after = load_rates("acme/super-llm")
+    assert float(after["prompt_per_1m"]) == 9.99
+    assert float(after["completion_per_1m"]) == 4.56
+
+    delete_rate("acme/super-llm")
+    assert load_rates("acme/super-llm") is None
