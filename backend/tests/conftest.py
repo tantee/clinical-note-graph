@@ -11,9 +11,30 @@ import asyncio
 import json
 import os
 from collections import defaultdict
+from datetime import datetime, timezone
 from typing import Any, Iterable
 
 import pytest
+
+
+def _lock_expired(lock_until: Any) -> bool:
+    """Returns True if the lock string represents a moment already in the past.
+
+    Tests pass ISO-8601 strings (with timezone). Treat None/"" or unparseable
+    values as expired so the fake mimics SQL's `locked_until < now()`.
+    """
+    if lock_until is None or lock_until == "":
+        return True
+    if isinstance(lock_until, datetime):
+        dt = lock_until
+    else:
+        try:
+            dt = datetime.fromisoformat(str(lock_until))
+        except ValueError:
+            return True
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt < datetime.now(timezone.utc)
 
 
 # ---------------------------------------------------------------------------
@@ -154,10 +175,36 @@ class FakeStore:
                 "progress": {},
             }
             return FakeResult([])
+        if s.startswith("with claimed as"):
+            candidates = [
+                r for r in self.jobs.values()
+                if (r["status"] == "pending")
+                or (r["status"] == "running" and _lock_expired(r.get("locked_until")))
+            ]
+            candidates.sort(key=lambda x: x["job_id"])
+            if not candidates:
+                return FakeResult([])
+            job = candidates[0]
+            job["status"] = "running"
+            job["locked_by"] = params["wid"]
+            job["locked_until"] = params["lock"]
+            job["attempts"] = (job.get("attempts") or 0) + 1
+            return FakeResult([job])
         if s.startswith("update jobs"):
             job_id = params.get("jid") or params.get("j")
             row = self.jobs.get(job_id)
             if row is None:
+                return FakeResult([])
+            if "status='completed'" in s:
+                row["status"] = "completed"
+                row["result"] = (
+                    json.loads(params["r"]) if isinstance(params.get("r"), str) else (params.get("r") or {})
+                )
+                row["progress"] = (
+                    json.loads(params["p"]) if isinstance(params.get("p"), str) else (params.get("p") or {})
+                )
+                row["locked_by"] = None
+                row["locked_until"] = None
                 return FakeResult([])
             if "set progress" in s:
                 row["progress"] = json.loads(params["p"]) if isinstance(params.get("p"), str) else (params.get("p") or {})
@@ -305,6 +352,8 @@ def fake_store(monkeypatch):
     monkeypatch.setattr(pricing_mod, "db_session", _db_session)
     import app.services.ai_provider as ai_provider_mod
     monkeypatch.setattr(ai_provider_mod, "db_session", _db_session)
+    import app.services.queue as queue_mod
+    monkeypatch.setattr(queue_mod, "db_session", _db_session)
     import app.routers.config as cfg_router
     monkeypatch.setattr(cfg_router, "db_session", _db_session)
     import app.routers.patient as p_router

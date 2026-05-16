@@ -46,6 +46,11 @@ class Settings(BaseSettings):
     CORS_ORIGINS: str = "*"  # comma-separated; "*" means "any" (dev only)
     API_KEY: str = ""  # if non-empty, X-API-Key is required on /api/emr|/api/config|/api/export|/api/facts
 
+    # Async job queue
+    QUEUE_WORKERS: int = 2
+    JOB_LOCK_SECONDS: int = 120
+    JOB_GRACE_SECONDS: int = 15
+
     @property
     def pg_dsn(self) -> str:
         return (
