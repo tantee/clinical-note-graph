@@ -105,7 +105,43 @@
         </v-navigation-drawer>
       </v-window-item>
       <v-window-item value="jobs">
-        <v-alert type="info" variant="tonal">Jobs view — coming in Task 17.</v-alert>
+        <v-card>
+          <SectionHeader title="Jobs" icon="mdi-clock-outline">
+            <template #actions>
+              <v-select
+                v-model="jobsStatus"
+                :items="['', 'pending', 'running', 'completed', 'failed']"
+                label="Status"
+                density="compact"
+                hide-details
+                style="max-width: 160px"
+                clearable
+              />
+            </template>
+          </SectionHeader>
+          <v-divider />
+          <v-data-table :headers="jobsHeaders" :items="jobsRows" :loading="jobsLoading">
+            <template #item.status="{ item }">
+              <v-chip
+                size="x-small"
+                :color="{ completed: 'success', failed: 'error', running: 'info', pending: 'warning' }[item.status] || 'grey'"
+                variant="tonal"
+              >
+                {{ item.status }}
+              </v-chip>
+            </template>
+            <template #item.actions="{ item }">
+              <v-btn
+                v-if="item.status === 'failed'"
+                size="x-small"
+                color="primary"
+                @click="requeue(item)"
+              >
+                Re-queue
+              </v-btn>
+            </template>
+          </v-data-table>
+        </v-card>
       </v-window-item>
     </v-window>
   </div>
@@ -113,7 +149,7 @@
 
 <script setup>
 import { computed, onMounted, ref, watch } from 'vue'
-import { getDebugSummary, getDebugByModel, getDebugByDay, listAiCalls, getAiCall } from '../api/client.js'
+import { getDebugSummary, getDebugByModel, getDebugByDay, listAiCalls, getAiCall, listJobs, requeueJob } from '../api/client.js'
 import { formatTokens, formatUSD } from '../utils/format.js'
 import SectionHeader from '../components/SectionHeader.vue'
 import BarChart from '../components/BarChart.vue'
@@ -212,8 +248,39 @@ async function onCallClick(_, ctx) {
   callDrawer.value = true
 }
 
-watch(tab, (t) => { if (t === 'calls') loadCalls() })
+const jobsHeaders = [
+  { title: 'Created',  key: 'created_at' },
+  { title: 'Type',     key: 'type' },
+  { title: 'Patient',  key: 'patient_id' },
+  { title: 'Status',   key: 'status' },
+  { title: 'Attempts', key: 'attempts', align: 'end' },
+  { title: '',         key: 'actions', sortable: false, align: 'end' },
+]
+
+const jobsRows = ref([])
+const jobsLoading = ref(false)
+const jobsStatus = ref('')
+
+async function loadJobs() {
+  jobsLoading.value = true
+  try {
+    jobsRows.value = await listJobs({ status: jobsStatus.value || undefined, limit: 100 })
+  } finally {
+    jobsLoading.value = false
+  }
+}
+
+async function requeue(job) {
+  await requeueJob(job.job_id)
+  await loadJobs()
+}
+
+watch(tab, (t) => {
+  if (t === 'calls') loadCalls()
+  if (t === 'jobs')  loadJobs()
+})
 watch([callsQ, callsStatus], loadCalls)
+watch(jobsStatus, loadJobs)
 
 onMounted(reload)
 </script>

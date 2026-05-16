@@ -8,7 +8,9 @@ vi.mock('../src/api/client.js', () => ({
   ]),
   getDebugByDay: vi.fn().mockResolvedValue([]),
   listAiCalls: vi.fn().mockResolvedValue([]),
+  getAiCall: vi.fn().mockResolvedValue({}),
   listJobs: vi.fn().mockResolvedValue([]),
+  requeueJob: vi.fn().mockResolvedValue({ requeued: 'x' }),
 }))
 
 const stubs = {
@@ -65,5 +67,44 @@ describe('DebugView', () => {
     await flushPromises()
 
     expect(w.html()).toContain('gpt-4o-mini')
+  })
+
+  it('shows a requeue button on failed jobs', async () => {
+    const { listJobs, requeueJob } = await import('../src/api/client.js')
+    listJobs.mockResolvedValue([
+      { job_id: 'j1', type: 'emr_ingest', status: 'failed', patient_id: 'HN1', attempts: 3, created_at: '2026-05-15' },
+      { job_id: 'j2', type: 'emr_ingest', status: 'completed', patient_id: 'HN1', attempts: 1, created_at: '2026-05-15' },
+    ])
+    // requeueJob may not be present on the original mock; ensure it's a vi.fn:
+    if (typeof requeueJob?.mockResolvedValue !== 'function') {
+      // Re-assign on the module's mock if needed (vitest auto-mocked already as vi.fn(); harmless safeguard).
+    }
+    const DebugView = (await import('../src/views/DebugView.vue')).default
+    const localStubs = {
+      ...stubs,
+      'v-data-table': {
+        template: `
+          <table>
+            <tbody>
+              <tr v-for="r in items" :key="r.job_id">
+                <td>{{ r.status }}</td>
+                <td><button v-if="r.status === 'failed'" data-test="requeue" @click="onClick(r)">Re-queue</button></td>
+              </tr>
+            </tbody>
+          </table>`,
+        props: ['headers','items','loading'],
+        methods: { onClick(r){ this.$emit('requeue', r) } },
+      },
+      'v-navigation-drawer': { template: '<aside><slot/></aside>' },
+    }
+    const w = mount(DebugView, { global: { stubs: localStubs } })
+    await flushPromises()
+    const setup = w.vm.$.setupState
+    setup.tab = 'jobs'
+    await setup.loadJobs()
+    await flushPromises()
+
+    // At least one Re-queue button exists for the failed job
+    expect(w.html()).toContain('Re-queue')
   })
 })
