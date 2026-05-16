@@ -2,13 +2,18 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from abc import ABC, abstractmethod
-from datetime import datetime
-from typing import Any
+from dataclasses import dataclass
+from decimal import Decimal
+from typing import Any, Literal
 
 import httpx
+from sqlalchemy import text
 
 from app.config import Settings
+from app.db.helpers import j
+from app.db.postgres import db_session
 from app.prompts.templates import (
     CODING_SUGGEST_SYSTEM,
     EXTRACTION_SYSTEM,
@@ -16,7 +21,78 @@ from app.prompts.templates import (
     SUMMARY_SYSTEM,
 )
 from app.schemas.extraction import ClinicalExtractionResult
+from app.services.pricing import compute_cost, load_rates
 from app.services.runtime_config import effective as effective_settings
+
+
+CallType = Literal["extract", "summary", "coding", "embed"]
+
+
+@dataclass
+class AICallRecord:
+    call_type: CallType
+    model: str
+    prompt_tokens: int | None
+    completion_tokens: int | None
+    total_tokens: int | None
+    latency_ms: int
+    cost_usd: Decimal | None
+    raw_response: dict
+    error: str | None
+    job_id: str | None
+    patient_id: str | None
+    document_id: str | None
+
+
+_PROMPT_TEMPLATE_BY_CALL_TYPE = {
+    "extract": "EMR_EXTRACTION",
+    "summary": "SUMMARY",
+    "coding": "CODING_SUGGEST",
+    "embed": "EMBED",
+}
+
+
+def _persist_ai_call(rec: AICallRecord, *, valid: bool, validation_errors: list) -> None:
+    """Persist one AI provider call into ai_outputs with all metering columns."""
+    with db_session() as s:
+        s.execute(
+            text(
+                """
+                INSERT INTO ai_outputs
+                  (document_id, patient_id, job_id, prompt_template, model, raw_output,
+                   valid, validation_errors, call_type, prompt_tokens, completion_tokens,
+                   total_tokens, latency_ms, cost_usd, error)
+                VALUES
+                  (:d, :p, :job_id, :pt, :m, CAST(:r AS jsonb),
+                   :v, CAST(:e AS jsonb), :call_type, :prompt_tokens, :completion_tokens,
+                   :total_tokens, :latency_ms, :cost_usd, :err)
+                """
+            ),
+            {
+                "d": rec.document_id,
+                "p": rec.patient_id,
+                "job_id": rec.job_id,
+                "pt": _PROMPT_TEMPLATE_BY_CALL_TYPE.get(rec.call_type, rec.call_type.upper()),
+                "m": rec.model,
+                "r": j(rec.raw_response),
+                "v": valid,
+                "e": j(validation_errors),
+                "call_type": rec.call_type,
+                "prompt_tokens": rec.prompt_tokens,
+                "completion_tokens": rec.completion_tokens,
+                "total_tokens": rec.total_tokens,
+                "latency_ms": rec.latency_ms,
+                "cost_usd": str(rec.cost_usd) if rec.cost_usd is not None else None,
+                "err": rec.error,
+            },
+        )
+
+
+def _estimate_tokens(text_in: str) -> int:
+    """Cheap dev-friendly token estimate: ~1.3 tokens per whitespace word, min 1."""
+    if not text_in:
+        return 1
+    return max(1, int(len(text_in.split()) * 1.3))
 
 
 class AIProvider(ABC):
@@ -29,19 +105,42 @@ class AIProvider(ABC):
         encounter_dt: str,
         document_id: str,
         content: str,
-    ) -> dict[str, Any]:
+        job_id: str | None = None,
+    ) -> tuple[dict[str, Any], AICallRecord]:
         ...
 
     @abstractmethod
-    async def suggest_coding(self, *, patient_facts: dict[str, Any], standards: list[str]) -> dict[str, Any]:
+    async def suggest_coding(
+        self,
+        *,
+        patient_facts: dict[str, Any],
+        standards: list[str],
+        job_id: str | None = None,
+        patient_id: str | None = None,
+    ) -> tuple[dict[str, Any], AICallRecord]:
         ...
 
     @abstractmethod
-    async def summarize(self, *, patient_facts: dict[str, Any], summary_type: str) -> str:
+    async def summarize(
+        self,
+        *,
+        patient_facts: dict[str, Any],
+        summary_type: str,
+        job_id: str | None = None,
+        patient_id: str | None = None,
+    ) -> tuple[str, AICallRecord]:
         ...
 
-    async def embed(self, text: str) -> list[float]:
-        return []  # Providers that don't support embeddings return empty so the caller skips writes.
+    @abstractmethod
+    async def embed(
+        self,
+        text_in: str,
+        *,
+        job_id: str | None = None,
+        patient_id: str | None = None,
+        ref_id: str | None = None,
+    ) -> tuple[list[float], AICallRecord]:
+        ...
 
 
 # ----------------------------- MOCK PROVIDER -----------------------------
@@ -241,6 +340,96 @@ def mock_extract(content: str, *, patient_id: str, encounter_id: str | None, doc
     return result
 
 
+def _mock_summary_markdown(patient_facts: dict[str, Any], summary_type: str) -> str:
+    problems = patient_facts.get("problems", [])
+    meds = patient_facts.get("medications", [])
+    obs = patient_facts.get("observations", [])
+    plans = patient_facts.get("plans", [])
+
+    lines = [f"# Patient Summary ({summary_type})", ""]
+    if problems:
+        lines.append("## Active problems")
+        for p in problems:
+            code = f" `{p.get('normalizedCode')}`" if p.get("normalizedCode") else ""
+            lines.append(f"- {p.get('value')}{code}")
+        lines.append("")
+    if meds:
+        lines.append("## Medications")
+        for m in meds:
+            lines.append(
+                f"- {m.get('name')} — {m.get('action', 'start')}"
+                f"{(' (' + m.get('indication') + ')') if m.get('indication') else ''}"
+            )
+        lines.append("")
+    if obs:
+        lines.append("## Recent observations")
+        for o in obs[:20]:
+            lines.append(f"- {o.get('name')}: {o.get('value')} {o.get('unit', '')}".rstrip())
+        lines.append("")
+    if plans:
+        lines.append("## Plan")
+        for p in plans:
+            lines.append(f"- {p.get('description')}")
+        lines.append("")
+    lines.append("> AI-assisted output requires clinical review.")
+    return "\n".join(lines)
+
+
+def _mock_suggest_coding(patient_facts: dict[str, Any], standards: list[str]) -> dict[str, Any]:
+    diagnoses = []
+    candidates: list[dict[str, Any]] = []
+    seen = set()
+    for f in patient_facts.get("problems", []):
+        cond = f.get("value")
+        if not cond or cond in seen:
+            continue
+        seen.add(cond)
+        icd = f.get("normalizedCode") if f.get("codingSystem") == "ICD10" else None
+        snomed = None
+        for k, v in KEYWORDS.items():
+            if v["value"].lower() == cond.lower():
+                icd = icd or v["icd10"]
+                snomed = v["snomed"]
+                break
+        diagnoses.append(
+            {
+                "condition": cond,
+                "icd10": icd,
+                "snomed": snomed,
+                "evidenceText": f.get("evidenceText"),
+                "confidence": float(f.get("confidence", 0.5)),
+                "role": "candidate",
+            }
+        )
+        if "ICD10" in standards and icd:
+            candidates.append(
+                {"code": icd, "system": "ICD10", "display": cond, "forCondition": cond, "confidence": 0.6}
+            )
+        if "SNOMEDCT" in standards and snomed:
+            candidates.append(
+                {"code": snomed, "system": "SNOMEDCT", "display": cond, "forCondition": cond, "confidence": 0.6}
+            )
+
+    diagnoses.sort(key=lambda d: -d.get("confidence", 0.0))
+    primary = diagnoses[0] if diagnoses else None
+    if primary:
+        primary = {**primary, "role": "primary"}
+    secondary = [{**d, "role": "secondary"} for d in diagnoses[1:]]
+    return {
+        "primaryDiagnosis": primary,
+        "secondaryDiagnoses": secondary,
+        "complications": [],
+        "comorbidities": [],
+        "codingCandidates": candidates,
+        "evidence": [
+            {"condition": d["condition"], "evidence": d.get("evidenceText")}
+            for d in diagnoses
+            if d.get("evidenceText")
+        ],
+        "warnings": [],
+    }
+
+
 class MockProvider(AIProvider):
     async def extract(
         self,
@@ -250,95 +439,131 @@ class MockProvider(AIProvider):
         encounter_dt: str,
         document_id: str,
         content: str,
-    ) -> dict[str, Any]:
-        return mock_extract(content, patient_id=patient_id, encounter_id=None, document_id=document_id)
+        job_id: str | None = None,
+    ) -> tuple[dict[str, Any], AICallRecord]:
+        t0 = time.perf_counter()
+        out = mock_extract(content, patient_id=patient_id, encounter_id=None, document_id=document_id)
+        latency_ms = int((time.perf_counter() - t0) * 1000)
+        prompt_tok = _estimate_tokens(content)
+        completion_tok = _estimate_tokens(str(out)[:5000])
+        rec = AICallRecord(
+            call_type="extract",
+            model="mock",
+            prompt_tokens=prompt_tok,
+            completion_tokens=completion_tok,
+            total_tokens=prompt_tok + completion_tok,
+            latency_ms=latency_ms,
+            cost_usd=compute_cost(
+                load_rates("mock"),
+                prompt_tokens=prompt_tok,
+                completion_tokens=completion_tok,
+            ),
+            raw_response=out,
+            error=None,
+            job_id=job_id,
+            patient_id=patient_id,
+            document_id=document_id,
+        )
+        _persist_ai_call(rec, valid=True, validation_errors=[])
+        return out, rec
 
-    async def suggest_coding(self, *, patient_facts: dict[str, Any], standards: list[str]) -> dict[str, Any]:
-        # Convert existing facts into candidate codes deterministically.
-        diagnoses = []
-        candidates: list[dict[str, Any]] = []
-        seen = set()
-        for f in patient_facts.get("problems", []):
-            cond = f.get("value")
-            if not cond or cond in seen:
-                continue
-            seen.add(cond)
-            icd = f.get("normalizedCode") if f.get("codingSystem") == "ICD10" else None
-            snomed = None
-            for k, v in KEYWORDS.items():
-                if v["value"].lower() == cond.lower():
-                    icd = icd or v["icd10"]
-                    snomed = v["snomed"]
-                    break
-            diagnoses.append(
-                {
-                    "condition": cond,
-                    "icd10": icd,
-                    "snomed": snomed,
-                    "evidenceText": f.get("evidenceText"),
-                    "confidence": float(f.get("confidence", 0.5)),
-                    "role": "candidate",
-                }
-            )
-            if "ICD10" in standards and icd:
-                candidates.append(
-                    {"code": icd, "system": "ICD10", "display": cond, "forCondition": cond, "confidence": 0.6}
-                )
-            if "SNOMEDCT" in standards and snomed:
-                candidates.append(
-                    {"code": snomed, "system": "SNOMEDCT", "display": cond, "forCondition": cond, "confidence": 0.6}
-                )
+    async def suggest_coding(
+        self,
+        *,
+        patient_facts: dict[str, Any],
+        standards: list[str],
+        job_id: str | None = None,
+        patient_id: str | None = None,
+    ) -> tuple[dict[str, Any], AICallRecord]:
+        t0 = time.perf_counter()
+        out = _mock_suggest_coding(patient_facts, standards)
+        latency_ms = int((time.perf_counter() - t0) * 1000)
+        prompt_tok = _estimate_tokens(str(patient_facts)[:8000])
+        completion_tok = _estimate_tokens(str(out)[:5000])
+        rec = AICallRecord(
+            call_type="coding",
+            model="mock",
+            prompt_tokens=prompt_tok,
+            completion_tokens=completion_tok,
+            total_tokens=prompt_tok + completion_tok,
+            latency_ms=latency_ms,
+            cost_usd=compute_cost(
+                load_rates("mock"),
+                prompt_tokens=prompt_tok,
+                completion_tokens=completion_tok,
+            ),
+            raw_response=out,
+            error=None,
+            job_id=job_id,
+            patient_id=patient_id,
+            document_id=None,
+        )
+        _persist_ai_call(rec, valid=True, validation_errors=[])
+        return out, rec
 
-        # pick primary = highest-confidence diagnosis
-        diagnoses.sort(key=lambda d: -d.get("confidence", 0.0))
-        primary = diagnoses[0] if diagnoses else None
-        if primary:
-            primary = {**primary, "role": "primary"}
-        secondary = [
-            {**d, "role": "secondary"} for d in diagnoses[1:]
-        ]
-        return {
-            "primaryDiagnosis": primary,
-            "secondaryDiagnoses": secondary,
-            "complications": [],
-            "comorbidities": [],
-            "codingCandidates": candidates,
-            "evidence": [
-                {"condition": d["condition"], "evidence": d.get("evidenceText")} for d in diagnoses if d.get("evidenceText")
-            ],
-            "warnings": [],
-        }
+    async def summarize(
+        self,
+        *,
+        patient_facts: dict[str, Any],
+        summary_type: str,
+        job_id: str | None = None,
+        patient_id: str | None = None,
+    ) -> tuple[str, AICallRecord]:
+        t0 = time.perf_counter()
+        md = _mock_summary_markdown(patient_facts, summary_type)
+        latency_ms = int((time.perf_counter() - t0) * 1000)
+        prompt_tok = _estimate_tokens(str(patient_facts)[:8000])
+        completion_tok = _estimate_tokens(md)
+        rec = AICallRecord(
+            call_type="summary",
+            model="mock",
+            prompt_tokens=prompt_tok,
+            completion_tokens=completion_tok,
+            total_tokens=prompt_tok + completion_tok,
+            latency_ms=latency_ms,
+            cost_usd=compute_cost(
+                load_rates("mock"),
+                prompt_tokens=prompt_tok,
+                completion_tokens=completion_tok,
+            ),
+            raw_response={"markdown": md},
+            error=None,
+            job_id=job_id,
+            patient_id=patient_id,
+            document_id=None,
+        )
+        _persist_ai_call(rec, valid=True, validation_errors=[])
+        return md, rec
 
-    async def summarize(self, *, patient_facts: dict[str, Any], summary_type: str) -> str:
-        problems = patient_facts.get("problems", [])
-        meds = patient_facts.get("medications", [])
-        obs = patient_facts.get("observations", [])
-        plans = patient_facts.get("plans", [])
-
-        lines = [f"# Patient Summary ({summary_type})", ""]
-        if problems:
-            lines.append("## Active problems")
-            for p in problems:
-                code = f" `{p.get('normalizedCode')}`" if p.get("normalizedCode") else ""
-                lines.append(f"- {p.get('value')}{code}")
-            lines.append("")
-        if meds:
-            lines.append("## Medications")
-            for m in meds:
-                lines.append(f"- {m.get('name')} — {m.get('action', 'start')}{(' (' + m.get('indication') + ')') if m.get('indication') else ''}")
-            lines.append("")
-        if obs:
-            lines.append("## Recent observations")
-            for o in obs[:20]:
-                lines.append(f"- {o.get('name')}: {o.get('value')} {o.get('unit', '')}".rstrip())
-            lines.append("")
-        if plans:
-            lines.append("## Plan")
-            for p in plans:
-                lines.append(f"- {p.get('description')}")
-            lines.append("")
-        lines.append("> AI-assisted output requires clinical review.")
-        return "\n".join(lines)
+    async def embed(
+        self,
+        text_in: str,
+        *,
+        job_id: str | None = None,
+        patient_id: str | None = None,
+        ref_id: str | None = None,
+    ) -> tuple[list[float], AICallRecord]:
+        t0 = time.perf_counter()
+        # Mock provider returns no vector — caller treats [] as "skip persisting".
+        vec: list[float] = []
+        latency_ms = int((time.perf_counter() - t0) * 1000)
+        prompt_tok = _estimate_tokens(text_in)
+        rec = AICallRecord(
+            call_type="embed",
+            model="mock",
+            prompt_tokens=prompt_tok,
+            completion_tokens=None,
+            total_tokens=prompt_tok,
+            latency_ms=latency_ms,
+            cost_usd=compute_cost(load_rates("mock"), embedding_tokens=prompt_tok),
+            raw_response={"ref_id": ref_id, "note": "mock embedding (empty vector)"},
+            error=None,
+            job_id=job_id,
+            patient_id=patient_id,
+            document_id=None,
+        )
+        _persist_ai_call(rec, valid=True, validation_errors=[])
+        return vec, rec
 
 
 # ----------------------------- OPENAI-COMPATIBLE PROVIDER -----------------------------
@@ -357,7 +582,7 @@ class OpenAICompatibleProvider(AIProvider):
         if settings.AI_API_KEY:
             self.headers["Authorization"] = f"Bearer {settings.AI_API_KEY}"
 
-    async def _chat(self, system: str, user: str, *, json_mode: bool = True) -> str:
+    async def _chat(self, system: str, user: str, *, json_mode: bool = True) -> tuple[str, dict[str, Any]]:
         payload: dict[str, Any] = {
             "model": self.model,
             "messages": [
@@ -373,7 +598,7 @@ class OpenAICompatibleProvider(AIProvider):
             r = await client.post(f"{self.base_url}/chat/completions", json=payload, headers=self.headers)
             r.raise_for_status()
             data = r.json()
-            return data["choices"][0]["message"]["content"]
+            return data["choices"][0]["message"]["content"], data
 
     async def extract(
         self,
@@ -383,7 +608,8 @@ class OpenAICompatibleProvider(AIProvider):
         encounter_dt: str,
         document_id: str,
         content: str,
-    ) -> dict[str, Any]:
+        job_id: str | None = None,
+    ) -> tuple[dict[str, Any], AICallRecord]:
         system = EXTRACTION_SYSTEM + "\n\nSchema:\n" + json.dumps(
             ClinicalExtractionResult.model_json_schema()
         )
@@ -394,14 +620,45 @@ class OpenAICompatibleProvider(AIProvider):
             document_id=document_id,
             content=content,
         )
-        raw = await self._chat(system, user, json_mode=True)
-        parsed = json.loads(raw)
-        # Make sure patientId/documentId are set even if model omitted
+        t0 = time.perf_counter()
+        raw_text, raw_resp = await self._chat(system, user, json_mode=True)
+        latency_ms = int((time.perf_counter() - t0) * 1000)
+        usage = raw_resp.get("usage") or {}
+        prompt_tok = usage.get("prompt_tokens")
+        completion_tok = usage.get("completion_tokens")
+        total_tok = usage.get("total_tokens")
+        parsed = json.loads(raw_text)
         parsed.setdefault("patientId", patient_id)
         parsed.setdefault("documentId", document_id)
-        return parsed
+        rec = AICallRecord(
+            call_type="extract",
+            model=self.model,
+            prompt_tokens=prompt_tok,
+            completion_tokens=completion_tok,
+            total_tokens=total_tok,
+            latency_ms=latency_ms,
+            cost_usd=compute_cost(
+                load_rates(self.model),
+                prompt_tokens=prompt_tok or 0,
+                completion_tokens=completion_tok or 0,
+            ),
+            raw_response=raw_resp,
+            error=None,
+            job_id=job_id,
+            patient_id=patient_id,
+            document_id=document_id,
+        )
+        _persist_ai_call(rec, valid=True, validation_errors=[])
+        return parsed, rec
 
-    async def suggest_coding(self, *, patient_facts: dict[str, Any], standards: list[str]) -> dict[str, Any]:
+    async def suggest_coding(
+        self,
+        *,
+        patient_facts: dict[str, Any],
+        standards: list[str],
+        job_id: str | None = None,
+        patient_id: str | None = None,
+    ) -> tuple[dict[str, Any], AICallRecord]:
         system = CODING_SUGGEST_SYSTEM
         user = (
             "Patient structured facts:\n"
@@ -410,24 +667,113 @@ class OpenAICompatibleProvider(AIProvider):
             "Return JSON with keys: primaryDiagnosis, secondaryDiagnoses, complications, comorbidities, "
             "codingCandidates, evidence, warnings."
         )
-        raw = await self._chat(system, user, json_mode=True)
-        return json.loads(raw)
+        t0 = time.perf_counter()
+        raw_text, raw_resp = await self._chat(system, user, json_mode=True)
+        latency_ms = int((time.perf_counter() - t0) * 1000)
+        usage = raw_resp.get("usage") or {}
+        prompt_tok = usage.get("prompt_tokens")
+        completion_tok = usage.get("completion_tokens")
+        total_tok = usage.get("total_tokens")
+        parsed = json.loads(raw_text)
+        rec = AICallRecord(
+            call_type="coding",
+            model=self.model,
+            prompt_tokens=prompt_tok,
+            completion_tokens=completion_tok,
+            total_tokens=total_tok,
+            latency_ms=latency_ms,
+            cost_usd=compute_cost(
+                load_rates(self.model),
+                prompt_tokens=prompt_tok or 0,
+                completion_tokens=completion_tok or 0,
+            ),
+            raw_response=raw_resp,
+            error=None,
+            job_id=job_id,
+            patient_id=patient_id,
+            document_id=None,
+        )
+        _persist_ai_call(rec, valid=True, validation_errors=[])
+        return parsed, rec
 
-    async def summarize(self, *, patient_facts: dict[str, Any], summary_type: str) -> str:
+    async def summarize(
+        self,
+        *,
+        patient_facts: dict[str, Any],
+        summary_type: str,
+        job_id: str | None = None,
+        patient_id: str | None = None,
+    ) -> tuple[str, AICallRecord]:
         system = SUMMARY_SYSTEM.format(summary_type=summary_type)
         user = "Structured facts:\n" + json.dumps(patient_facts, default=str)
-        return await self._chat(system, user, json_mode=False)
+        t0 = time.perf_counter()
+        raw_text, raw_resp = await self._chat(system, user, json_mode=False)
+        latency_ms = int((time.perf_counter() - t0) * 1000)
+        usage = raw_resp.get("usage") or {}
+        prompt_tok = usage.get("prompt_tokens")
+        completion_tok = usage.get("completion_tokens")
+        total_tok = usage.get("total_tokens")
+        rec = AICallRecord(
+            call_type="summary",
+            model=self.model,
+            prompt_tokens=prompt_tok,
+            completion_tokens=completion_tok,
+            total_tokens=total_tok,
+            latency_ms=latency_ms,
+            cost_usd=compute_cost(
+                load_rates(self.model),
+                prompt_tokens=prompt_tok or 0,
+                completion_tokens=completion_tok or 0,
+            ),
+            raw_response=raw_resp,
+            error=None,
+            job_id=job_id,
+            patient_id=patient_id,
+            document_id=None,
+        )
+        _persist_ai_call(rec, valid=True, validation_errors=[])
+        return raw_text, rec
 
-    async def embed(self, text: str) -> list[float]:
+    async def embed(
+        self,
+        text_in: str,
+        *,
+        job_id: str | None = None,
+        patient_id: str | None = None,
+        ref_id: str | None = None,
+    ) -> tuple[list[float], AICallRecord]:
+        t0 = time.perf_counter()
         async with httpx.AsyncClient(timeout=60) as client:
             r = await client.post(
                 f"{self.base_url}/embeddings",
-                json={"model": self.embedding_model, "input": text},
+                json={"model": self.embedding_model, "input": text_in},
                 headers=self.headers,
             )
             r.raise_for_status()
             data = r.json()
-            return data["data"][0]["embedding"]
+        latency_ms = int((time.perf_counter() - t0) * 1000)
+        usage = data.get("usage") or {}
+        embed_tok = usage.get("prompt_tokens")
+        vec = data["data"][0]["embedding"]
+        rec = AICallRecord(
+            call_type="embed",
+            model=self.embedding_model,
+            prompt_tokens=embed_tok,
+            completion_tokens=None,
+            total_tokens=embed_tok,
+            latency_ms=latency_ms,
+            cost_usd=compute_cost(
+                load_rates(self.embedding_model),
+                embedding_tokens=embed_tok or 0,
+            ),
+            raw_response={"usage": usage, "ref_id": ref_id},
+            error=None,
+            job_id=job_id,
+            patient_id=patient_id,
+            document_id=None,
+        )
+        _persist_ai_call(rec, valid=True, validation_errors=[])
+        return vec, rec
 
 
 def get_ai_provider(settings: Settings | None = None) -> AIProvider:
