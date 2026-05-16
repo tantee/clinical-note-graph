@@ -303,6 +303,8 @@ def fake_store(monkeypatch):
     monkeypatch.setattr(rc_mod, "db_session", _db_session)
     import app.services.pricing as pricing_mod
     monkeypatch.setattr(pricing_mod, "db_session", _db_session)
+    import app.services.ai_provider as ai_provider_mod
+    monkeypatch.setattr(ai_provider_mod, "db_session", _db_session)
     import app.routers.config as cfg_router
     monkeypatch.setattr(cfg_router, "db_session", _db_session)
     import app.routers.patient as p_router

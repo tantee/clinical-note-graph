@@ -13,7 +13,7 @@ from app.services.patient_facts import gather_patient_facts
 async def suggest_coding(patient_id: str, req: CodingSuggestRequest) -> CodingSuggestResponse:
     facts = await asyncio.to_thread(gather_patient_facts, patient_id)
     provider = get_ai_provider()
-    raw = await provider.suggest_coding(patient_facts=facts, standards=req.standards)
+    raw, _rec = await provider.suggest_coding(patient_facts=facts, standards=req.standards, patient_id=patient_id)
 
     def to_diag(d: dict | None) -> DiagnosisCandidate | None:
         if not d:

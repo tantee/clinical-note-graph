@@ -156,19 +156,6 @@ def _facts_rows(*, patient_id: str, encounter_id: str, document_id: str, ex: Cli
     return rows
 
 
-def _store_ai_output(s, *, document_id: str, patient_id: str, model: str, raw: dict[str, Any], valid: bool, errors: list[Any]) -> None:
-    s.execute(
-        text(
-            "INSERT INTO ai_outputs (document_id, patient_id, prompt_template, model, raw_output, valid, validation_errors) "
-            "VALUES (:d, :p, :pt, :m, CAST(:r AS jsonb), :v, CAST(:e AS jsonb))"
-        ),
-        {
-            "d": document_id, "p": patient_id, "pt": "EMR_EXTRACTION", "m": model,
-            "r": j(raw), "v": valid, "e": j(errors),
-        },
-    )
-
-
 def _persist_pre_extraction(req: EMRIngestRequest) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], str, dict[str, Any] | None]:
     """Stage 1: persist patient + encounter + raw document. Returns the canonical structures."""
     text_for_ai, raw_json, fhir_overrides = _normalize_content(req)
@@ -206,14 +193,9 @@ def _persist_pre_extraction(req: EMRIngestRequest) -> tuple[dict[str, Any], dict
 
 
 def _persist_post_extraction(*, patient: dict[str, Any], encounter: dict[str, Any], document: dict[str, Any],
-                             extraction: ClinicalExtractionResult, raw_output: dict[str, Any],
-                             valid: bool, errors: list[Any], model: str) -> None:
-    """Stage 3: persist AI output + facts in one transaction."""
+                             extraction: ClinicalExtractionResult, valid: bool, errors: list[Any]) -> None:
+    """Stage 3: persist facts in one transaction. The provider already wrote ai_outputs."""
     with db_session() as s:
-        _store_ai_output(
-            s, document_id=document["documentId"], patient_id=patient["patientId"],
-            model=model, raw=raw_output, valid=valid, errors=errors,
-        )
         if not valid:
             audit(s, action="EXTRACTION_INVALID", target_type="document", target_id=document["documentId"],
                   payload={"errorCount": len(errors)})
@@ -233,12 +215,13 @@ async def run_ingest(req: EMRIngestRequest, *, job_id: str | None = None) -> dic
     patient, encounter, document, text_for_ai, _raw_json = await asyncio.to_thread(_persist_pre_extraction, req)
 
     provider = get_ai_provider(settings)
-    raw_output = await provider.extract(
+    raw_output, _ai_rec = await provider.extract(
         patient_id=patient["patientId"],
         encounter_type=encounter["type"],
         encounter_dt=str(encounter["dateTime"]),
         document_id=document["documentId"],
         content=text_for_ai,
+        job_id=job_id,
     )
     raw_output.setdefault("patientId", patient["patientId"])
     raw_output["documentId"] = document["documentId"]
@@ -259,8 +242,7 @@ async def run_ingest(req: EMRIngestRequest, *, job_id: str | None = None) -> dic
     await asyncio.to_thread(
         _persist_post_extraction,
         patient=patient, encounter=encounter, document=document,
-        extraction=extraction, raw_output=raw_output, valid=valid, errors=errors,
-        model=settings.AI_MODEL,
+        extraction=extraction, valid=valid, errors=errors,
     )
 
     graph_counts: dict[str, Any] = {}
@@ -280,6 +262,7 @@ async def run_ingest(req: EMRIngestRequest, *, job_id: str | None = None) -> dic
         try:
             await embed_and_store_many(
                 patient_id=patient["patientId"],
+                job_id=job_id,
                 items=[
                     {"ref_type": "fact", "ref_id": f"{document['documentId']}-cond-{f.value}",
                      "content": f"{f.value}\n{f.evidenceText or ''}", "metadata": {"type": "condition"}}

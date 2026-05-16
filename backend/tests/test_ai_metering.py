@@ -1,31 +1,5 @@
 import asyncio
-from contextlib import contextmanager
 from decimal import Decimal
-
-import pytest
-
-
-@pytest.fixture(autouse=True)
-def _patch_ai_provider_db(fake_store, monkeypatch):
-    """Route ai_provider's db_session through the FakeStore so _persist_ai_call
-    writes to the shared fake_store.ai_outputs and load_rates() reads pricing.
-    The shared fake_store fixture wires app.services.pricing.db_session, but
-    ai_provider.py keeps its own binding — patch it here.
-    """
-    from tests.conftest import FakeSession
-
-    @contextmanager
-    def _db_session():
-        sess = FakeSession(fake_store)
-        try:
-            yield sess
-            sess.commit()
-        except Exception:
-            sess.rollback()
-            raise
-
-    import app.services.ai_provider as ai_mod
-    monkeypatch.setattr(ai_mod, "db_session", _db_session)
 
 
 def _seed_pricing(fake_store):

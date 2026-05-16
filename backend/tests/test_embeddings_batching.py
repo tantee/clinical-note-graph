@@ -12,13 +12,13 @@ class _Provider:
         self.max_in_flight = 0
         self.calls = 0
 
-    async def embed(self, text):
+    async def embed(self, text, *, job_id=None, patient_id=None, ref_id=None):
         self.calls += 1
         self.in_flight += 1
         self.max_in_flight = max(self.max_in_flight, self.in_flight)
         try:
             await asyncio.sleep(0.01)
-            return [0.1] * 8
+            return [0.1] * 8, None
         finally:
             self.in_flight -= 1
 
@@ -49,10 +49,10 @@ def test_embed_many_skips_failures(monkeypatch, fake_store):
     from app.services import embeddings as emb_mod
 
     class _BadProvider:
-        async def embed(self, t):
+        async def embed(self, t, *, job_id=None, patient_id=None, ref_id=None):
             if "skipme" in t:
                 raise RuntimeError("boom")
-            return [0.0] * 4
+            return [0.0] * 4, None
 
     monkeypatch.setattr(emb_mod, "get_ai_provider", lambda *a, **k: _BadProvider())
     items = [

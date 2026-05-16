@@ -19,10 +19,15 @@ def _pgvector_literal(vec: list[float]) -> str:
     return "[" + ",".join(f"{x:.6f}" for x in vec) + "]"
 
 
-async def embed_and_store(*, patient_id: str, ref_type: str, ref_id: str, content: str, metadata: dict[str, Any] | None = None) -> None:
+async def embed_and_store(*, patient_id: str, ref_type: str, ref_id: str, content: str, metadata: dict[str, Any] | None = None, job_id: str | None = None) -> None:
     provider = get_ai_provider()
     try:
-        vec = await provider.embed(content)
+        vec, _rec = await provider.embed(
+            content,
+            job_id=job_id,
+            patient_id=patient_id,
+            ref_id=ref_id,
+        )
     except Exception:
         return
     if not vec:
@@ -42,7 +47,7 @@ async def embed_and_store(*, patient_id: str, ref_type: str, ref_id: str, conten
         )
 
 
-async def embed_and_store_many(*, patient_id: str, items: list[dict[str, Any]]) -> int:
+async def embed_and_store_many(*, patient_id: str, items: list[dict[str, Any]], job_id: str | None = None) -> int:
     """Embed many texts concurrently (bounded) and write the resulting rows in one transaction."""
     if not items:
         return 0
@@ -52,7 +57,12 @@ async def embed_and_store_many(*, patient_id: str, items: list[dict[str, Any]]) 
     async def embed_one(item: dict[str, Any]) -> dict[str, Any] | None:
         async with sem:
             try:
-                vec = await provider.embed(item["content"])
+                vec, _rec = await provider.embed(
+                    item["content"],
+                    job_id=job_id,
+                    patient_id=patient_id,
+                    ref_id=item.get("ref_id"),
+                )
             except Exception as exc:
                 logger.warning("embedding failed for %s: %s", item.get("ref_id"), exc)
                 return None
@@ -86,7 +96,7 @@ async def embed_and_store_many(*, patient_id: str, items: list[dict[str, Any]]) 
 async def vector_search(query: str, *, patient_id: str | None, limit: int = 10) -> list[dict[str, Any]]:
     provider = get_ai_provider()
     try:
-        vec = await provider.embed(query)
+        vec, _rec = await provider.embed(query)
     except Exception:
         return []
     if not vec:

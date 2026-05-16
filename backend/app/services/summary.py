@@ -12,7 +12,7 @@ async def make_summary(patient_id: str, req: SummaryRequest) -> SummaryResponse:
     end = req.dateRange.end if req.dateRange else None
     facts = await asyncio.to_thread(gather_patient_facts, patient_id, start=start, end=end)
     provider = get_ai_provider()
-    md = await provider.summarize(patient_facts=facts, summary_type=req.type)
+    md, _rec = await provider.summarize(patient_facts=facts, summary_type=req.type, patient_id=patient_id)
     return SummaryResponse(
         patientId=patient_id,
         type=req.type,
