@@ -29,3 +29,17 @@ export function confidenceTier(c) {
   if (c >= 0.6) return 'medium'
   return 'low'
 }
+
+export function formatUSD(amount) {
+  if (amount === null || amount === undefined) return '–'
+  const v = Number(amount)
+  if (!Number.isFinite(v)) return '–'
+  if (v < 0.01) return `$${v.toFixed(6)}`
+  if (v < 1)    return `$${v.toFixed(4)}`
+  return `$${v.toFixed(2)}`
+}
+
+export function formatTokens(n) {
+  if (n === null || n === undefined) return '–'
+  return Number(n).toLocaleString()
+}

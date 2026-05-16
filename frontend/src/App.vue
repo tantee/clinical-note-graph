@@ -12,6 +12,7 @@
       <v-btn variant="text" to="/patients" prepend-icon="mdi-account-multiple-outline">Patients</v-btn>
       <v-btn variant="text" to="/ingest" prepend-icon="mdi-cloud-upload-outline">Ingest</v-btn>
       <v-btn variant="text" to="/config" prepend-icon="mdi-cog-outline">Config</v-btn>
+      <v-btn variant="text" to="/debug" prepend-icon="mdi-chart-line-variant">Debug</v-btn>
       <v-btn
         variant="text"
         :href="apiDocsUrl"

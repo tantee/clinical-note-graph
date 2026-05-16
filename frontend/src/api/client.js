@@ -60,3 +60,29 @@ export const suggestCoding = (id, body) =>
 export const reviewFact = (factId, status) =>
   api.patch(`/api/facts/${factId}/review`, null, { params: { status } }).then(data)
 export const exportPatient = (body) => api.post('/api/export', body).then(data)
+
+export const getJob = (jobId, signal) =>
+  api.get(`/api/jobs/${encodeURIComponent(jobId)}`, { signal }).then(data)
+export const listJobs = (params, signal) =>
+  api.get('/api/jobs', { params, signal }).then(data)
+export const requeueJob = (jobId) =>
+  api.post(`/api/jobs/${encodeURIComponent(jobId)}/requeue`).then(data)
+
+export const getDebugSummary = (params, signal) =>
+  api.get('/api/debug/summary', { params, signal }).then(data)
+export const getDebugByModel = (params, signal) =>
+  api.get('/api/debug/by-model', { params, signal }).then(data)
+export const getDebugByDay = (params, signal) =>
+  api.get('/api/debug/by-day', { params, signal }).then(data)
+export const listAiCalls = (params, signal) =>
+  api.get('/api/debug/ai-calls', { params, signal }).then(data)
+export const getAiCall = (id, signal) =>
+  api.get(`/api/debug/ai-calls/${encodeURIComponent(id)}`, { signal }).then(data)
+
+export const listPricing = () => api.get('/api/config/pricing').then(data)
+export const upsertPricing = (model, body) =>
+  api.put(`/api/config/pricing/${encodeURIComponent(model)}`, body).then(data)
+export const deletePricing = (model) =>
+  api.delete(`/api/config/pricing/${encodeURIComponent(model)}`).then(data)
+export const refreshOpenRouter = () =>
+  api.post('/api/config/pricing/refresh-openrouter').then(data)
