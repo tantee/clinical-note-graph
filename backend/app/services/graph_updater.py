@@ -253,6 +253,20 @@ FOREACH (_ IN CASE WHEN c IS NULL THEN [] ELSE [1] END |
 """
 
 
+def _jsonable(value: Any) -> Any:
+    """Recursively convert neo4j temporal types (and their containers) to JSON-friendly values."""
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, dict):
+        return {k: _jsonable(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_jsonable(v) for v in value]
+    iso_method = getattr(value, "iso_format", None) or getattr(value, "isoformat", None)
+    if callable(iso_method):
+        return iso_method()
+    return str(value)
+
+
 def fetch_patient_graph(patient_id: str) -> dict[str, Any]:
     rows = run_cypher(
         """
@@ -281,10 +295,11 @@ def fetch_patient_graph(patient_id: str) -> dict[str, Any]:
     def add(label: str, item: dict[str, Any], key: str) -> str | None:
         if not item:
             return None
-        nid = f"{label}:{item.get(key)}"
+        clean = _jsonable(item)
+        nid = f"{label}:{clean.get(key)}"
         if nid not in seen:
             seen.add(nid)
-            nodes.append({"id": nid, "label": label, "data": item})
+            nodes.append({"id": nid, "label": label, "data": clean})
         return nid
 
     pid = add("Patient", row["p"], "patientId")

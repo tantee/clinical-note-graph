@@ -26,8 +26,9 @@ class Settings(BaseSettings):
     # Vault
     VAULT_PATH: str = "/data/vault"
 
-    # AI
-    AI_PROVIDER: str = "mock"  # mock | openai | ollama | custom
+    # AI: any OpenAI-compatible endpoint (OpenAI, OpenRouter, Groq, vLLM, …).
+    # `mock` runs a deterministic offline extractor.
+    AI_PROVIDER: str = "mock"  # mock | openai | custom
     AI_BASE_URL: str = ""
     AI_API_KEY: str = ""
     AI_MODEL: str = "gpt-4o-mini"

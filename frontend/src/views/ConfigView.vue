@@ -11,11 +11,27 @@
     <v-row>
       <v-col cols="12" md="6">
         <v-card>
-          <SectionHeader title="AI provider" icon="mdi-robot-outline" />
+          <SectionHeader title="AI provider" icon="mdi-robot-outline">
+            <template #actions>
+              <v-menu>
+                <template #activator="{ props }">
+                  <v-btn v-bind="props" size="small" variant="text" prepend-icon="mdi-lightning-bolt-outline">Quick setup</v-btn>
+                </template>
+                <v-list density="compact">
+                  <v-list-item @click="applyPreset('openrouter')" title="OpenRouter" subtitle="Single key, many models" />
+                  <v-list-item @click="applyPreset('openai')" title="OpenAI" subtitle="api.openai.com" />
+                  <v-list-item @click="applyPreset('groq')" title="Groq" subtitle="Llama, Mixtral on Groq Cloud" />
+                  <v-list-item @click="applyPreset('mock')" title="Mock (offline)" subtitle="Deterministic keyword extractor" />
+                </v-list>
+              </v-menu>
+            </template>
+          </SectionHeader>
           <v-divider />
           <v-card-text>
-            <v-select v-model="patch.AI_PROVIDER" :items="['mock','openai','ollama','custom']" label="Provider" />
-            <v-text-field v-model="patch.AI_BASE_URL" label="API base URL" placeholder="https://api.openai.com/v1 or http://ollama:11434/v1" />
+            <v-select v-model="patch.AI_PROVIDER" :items="['mock','openai','custom']" label="Provider"
+                      hint="Use 'openai' for any OpenAI-compatible endpoint (OpenRouter, Groq, vLLM, …)" persistent-hint />
+            <v-text-field v-model="patch.AI_BASE_URL" label="API base URL"
+                          placeholder="https://openrouter.ai/api/v1" class="mt-2" />
             <v-text-field
               v-model="patch.AI_API_KEY"
               label="API key"
@@ -187,6 +203,20 @@ async function save() {
   }
 }
 function reset() { load() }
+
+const PRESETS = {
+  openrouter: { AI_PROVIDER: 'openai', AI_BASE_URL: 'https://openrouter.ai/api/v1', AI_MODEL: 'anthropic/claude-3.5-sonnet', AI_EMBEDDING_MODEL: 'openai/text-embedding-3-small' },
+  openai:     { AI_PROVIDER: 'openai', AI_BASE_URL: 'https://api.openai.com/v1',    AI_MODEL: 'gpt-4o-mini',                  AI_EMBEDDING_MODEL: 'text-embedding-3-small' },
+  groq:       { AI_PROVIDER: 'openai', AI_BASE_URL: 'https://api.groq.com/openai/v1', AI_MODEL: 'llama-3.3-70b-versatile',    AI_EMBEDDING_MODEL: 'text-embedding-3-small' },
+  mock:       { AI_PROVIDER: 'mock',   AI_BASE_URL: '',                              AI_MODEL: 'gpt-4o-mini',                  AI_EMBEDDING_MODEL: 'text-embedding-3-small' },
+}
+function applyPreset(name) {
+  const preset = PRESETS[name]
+  if (!preset) return
+  Object.assign(patch.value, preset)
+  // Don't touch AI_API_KEY — that's user-supplied and we never store the masked value.
+  ui.success(`Applied ${name} preset. Set your API key, then Save.`)
+}
 async function saveProfile() {
   if (profileError.value) {
     ui.error('Fix the JSON in the config field first.')

@@ -20,7 +20,7 @@ A Dockerised prototype that turns inbound EMR documents into:
 | Frontend | **Vue 3 + Vuetify 3** | Per spec. Vite dev server, multi-stage prod build served by nginx. |
 | Relational DB | **PostgreSQL 16 + pgvector** | One image carries relational state and embeddings. |
 | Graph DB | **Neo4j 5 (community)** | Standard, mature Cypher tooling. Writes use `UNWIND` for one Cypher round-trip per fact type. |
-| AI | Pluggable provider (`mock` / OpenAI-compatible / Ollama / custom) | Defaults to deterministic mock so the stack runs offline with no key. |
+| AI | Pluggable provider — `mock` or any OpenAI-compatible endpoint (**OpenRouter**, OpenAI, Groq, vLLM, …) | Defaults to deterministic mock so the stack runs offline. OpenRouter is the recommended production path: one key, many models. |
 | Files | Bind-mounted volume `/data/vault` | Open the same folder in real Obsidian for a parallel UX. |
 
 ---
@@ -76,22 +76,45 @@ Try the demo:
 open http://localhost:5173/#/patients/HN123456             # explore
 ```
 
-To use a real model, edit `.env`:
+## Configuring the AI provider
 
-```env
-AI_PROVIDER=openai
-AI_BASE_URL=https://api.openai.com/v1   # or http://ollama:11434/v1
-AI_API_KEY=sk-…
-AI_MODEL=gpt-4o-mini
-AI_EMBEDDING_MODEL=text-embedding-3-small
-```
+Any OpenAI-compatible endpoint works. The backend speaks the standard `/chat/completions` and `/embeddings` shape, so the provider name `openai` is reused for all of them — only the `AI_BASE_URL` changes.
 
-Ollama is shipped as an opt-in profile:
+### OpenRouter (recommended for production trials)
+
+OpenRouter exposes hundreds of models — Claude, GPT, Gemini, Llama, Qwen — behind a single OpenAI-compatible API and a single key. It's the cheapest way to compare models without juggling vendor accounts.
+
+1. Get an API key at <https://openrouter.ai/keys>.
+2. Edit `.env`:
+
+   ```env
+   AI_PROVIDER=openai
+   AI_BASE_URL=https://openrouter.ai/api/v1
+   AI_API_KEY=sk-or-v1-…
+   AI_MODEL=anthropic/claude-3.5-sonnet         # or openai/gpt-4o-mini, google/gemini-2.0-flash-001, …
+   AI_EMBEDDING_MODEL=openai/text-embedding-3-small
+   ```
+
+3. `docker compose up --build`. Or change it live without restart from the **Config** page in the UI — there's a Quick-setup menu that fills these fields for OpenRouter / OpenAI / Groq.
+
+You can also `PATCH /api/config` to switch providers without restarting:
 
 ```bash
-docker compose --profile ollama up -d ollama
-docker compose exec ollama ollama pull llama3.1
+curl -X PATCH http://localhost:8000/api/config \
+  -H 'Content-Type: application/json' \
+  -d '{"AI_PROVIDER":"openai","AI_BASE_URL":"https://openrouter.ai/api/v1","AI_API_KEY":"sk-or-v1-...","AI_MODEL":"anthropic/claude-3.5-sonnet"}'
 ```
+
+### Other endpoints
+
+| Provider | `AI_BASE_URL` | Example `AI_MODEL` |
+|---|---|---|
+| OpenAI | `https://api.openai.com/v1` | `gpt-4o-mini` |
+| Groq | `https://api.groq.com/openai/v1` | `llama-3.3-70b-versatile` |
+| Self-hosted (vLLM, LM Studio, Ollama) | `http://host:port/v1` | whatever you served |
+| Mock / offline | leave blank, set `AI_PROVIDER=mock` | n/a |
+
+The mock provider is deterministic — it does ICD-10 / SNOMED / LOINC / RxNorm lookups against a small built-in keyword table, so the whole stack runs offline with no key and produces stable test fixtures.
 
 ---
 

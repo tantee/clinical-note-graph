@@ -37,16 +37,6 @@ services:
       retries: 10
     restart: unless-stopped
 
-  ollama:
-    image: ollama/ollama:latest
-    container_name: cng-ollama
-    profiles: ["ollama"]
-    ports:
-      - "${OLLAMA_PORT:-11434}:11434"
-    volumes:
-      - ollamadata:/root/.ollama
-    restart: unless-stopped
-
   backend:
     build: ./backend
     container_name: cng-backend
@@ -105,5 +95,4 @@ volumes:
   pgdata:
   neo4jdata:
   neo4jlogs:
-  ollamadata:
   vaultdata:
