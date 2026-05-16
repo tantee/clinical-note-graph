@@ -18,7 +18,7 @@ def _admission_payload() -> dict:
 
 
 def test_ingest_text_round_trip(app_client, fake_store):
-    r = app_client.post("/api/emr/ingest", json=_admission_payload())
+    r = app_client.post("/api/emr/ingest?async=false", json=_admission_payload())
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["patientId"] == "HN1"
@@ -35,9 +35,9 @@ def test_ingest_text_round_trip(app_client, fake_store):
 
 
 def test_ingest_idempotent(app_client, fake_store):
-    app_client.post("/api/emr/ingest", json=_admission_payload())
+    app_client.post("/api/emr/ingest?async=false", json=_admission_payload())
     facts_before = len(fake_store.facts)
-    app_client.post("/api/emr/ingest", json=_admission_payload())
+    app_client.post("/api/emr/ingest?async=false", json=_admission_payload())
     # Same (patientId, source.documentId, version) — document upserts, facts append (history).
     assert fake_store.documents["doc-001"]["document_id"] == "doc-001"
     assert len(fake_store.facts) >= facts_before
@@ -49,7 +49,7 @@ def test_get_patient_404_when_missing(app_client):
 
 
 def test_get_patient_aggregates(app_client):
-    app_client.post("/api/emr/ingest", json=_admission_payload())
+    app_client.post("/api/emr/ingest?async=false", json=_admission_payload())
     r = app_client.get("/api/patient/HN1")
     assert r.status_code == 200
     facts = r.json()
@@ -58,7 +58,7 @@ def test_get_patient_aggregates(app_client):
 
 
 def test_encounter_documents_endpoint(app_client):
-    app_client.post("/api/emr/ingest", json=_admission_payload())
+    app_client.post("/api/emr/ingest?async=false", json=_admission_payload())
     timeline = app_client.get("/api/patient/HN1/timeline").json()
     encounter_id = timeline["encounters"][0]["encounter_id"]
     docs = app_client.get(f"/api/patient/HN1/encounter/{encounter_id}/documents").json()
@@ -66,7 +66,7 @@ def test_encounter_documents_endpoint(app_client):
 
 
 def test_review_fact_audit_payload_safe(app_client, fake_store):
-    app_client.post("/api/emr/ingest", json=_admission_payload())
+    app_client.post("/api/emr/ingest?async=false", json=_admission_payload())
     fact_id = fake_store.facts[0]["id"]
     # The endpoint expects a real UUID, so we use a fixed shape that our fake store
     # echoes back. Validate the input rejection on invalid status:
@@ -97,7 +97,7 @@ def test_invalid_payload_returns_422(app_client):
 
 
 def test_summary_endpoint(app_client):
-    app_client.post("/api/emr/ingest", json=_admission_payload())
+    app_client.post("/api/emr/ingest?async=false", json=_admission_payload())
     r = app_client.post("/api/patient/HN1/summary", json={"type": "brief", "includeEvidence": False})
     assert r.status_code == 200
     body = r.json()
@@ -105,7 +105,7 @@ def test_summary_endpoint(app_client):
 
 
 def test_coding_suggest_endpoint(app_client):
-    app_client.post("/api/emr/ingest", json=_admission_payload())
+    app_client.post("/api/emr/ingest?async=false", json=_admission_payload())
     r = app_client.post("/api/patient/HN1/coding/suggest", json={"standards": ["ICD10", "SNOMEDCT"]})
     assert r.status_code == 200
     body = r.json()
@@ -113,7 +113,7 @@ def test_coding_suggest_endpoint(app_client):
 
 
 def test_export_fhir_bundle(app_client):
-    app_client.post("/api/emr/ingest", json=_admission_payload())
+    app_client.post("/api/emr/ingest?async=false", json=_admission_payload())
     r = app_client.post("/api/export", json={"patientId": "HN1", "exportType": "fhir_bundle"})
     assert r.status_code == 200
     bundle = r.json()["data"]
@@ -137,9 +137,9 @@ def test_api_key_enforced_when_configured(monkeypatch, app_client):
     from fastapi.testclient import TestClient
     from app.main import create_app
     with TestClient(create_app()) as client:
-        r = client.post("/api/emr/ingest", json=_admission_payload())
+        r = client.post("/api/emr/ingest?async=false", json=_admission_payload())
         assert r.status_code == 401
-        r = client.post("/api/emr/ingest", json=_admission_payload(), headers={"X-API-Key": "wrong"})
+        r = client.post("/api/emr/ingest?async=false", json=_admission_payload(), headers={"X-API-Key": "wrong"})
         assert r.status_code == 401
-        r = client.post("/api/emr/ingest", json=_admission_payload(), headers={"X-API-Key": "test-key"})
+        r = client.post("/api/emr/ingest?async=false", json=_admission_payload(), headers={"X-API-Key": "test-key"})
         assert r.status_code == 200

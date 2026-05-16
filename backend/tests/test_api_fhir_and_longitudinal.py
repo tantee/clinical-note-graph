@@ -30,7 +30,7 @@ def test_fhir_ingest(app_client, fake_store):
         "content": _fhir_bundle(),
         "source": {"system": "FHIR-X", "documentId": "fhir-001", "version": "1"},
     }
-    r = app_client.post("/api/emr/ingest", json=payload)
+    r = app_client.post("/api/emr/ingest?async=false", json=payload)
     assert r.status_code == 200, r.text
     assert fake_store.patients["HN42"]["name"] == "Malee Demo"
     assert any("pneumonia" in f["value"].lower() for f in fake_store.facts)
@@ -44,14 +44,14 @@ def test_longitudinal_merge_creates_two_documents(app_client, fake_store):
         "content": "Patient has hypertension. BP 152/92.",
         "source": {"system": "HIS", "documentId": "adm-9", "version": "1"},
     }
-    r1 = app_client.post("/api/emr/ingest", json=base)
+    r1 = app_client.post("/api/emr/ingest?async=false", json=base)
     progress = {
         **base,
         "encounter": {"type": "progress_note", "dateTime": "2026-01-05T09:00:00+07:00"},
         "content": "Day 4. BP 132/82 on lisinopril.",
         "source": {"system": "HIS", "documentId": "prog-9", "version": "1"},
     }
-    r2 = app_client.post("/api/emr/ingest", json=progress)
+    r2 = app_client.post("/api/emr/ingest?async=false", json=progress)
     assert r1.status_code == 200 and r2.status_code == 200
     assert {"adm-9", "prog-9"} == set(fake_store.documents.keys())
 

@@ -16,6 +16,7 @@ from app.middleware import ApiKeyMiddleware, RequestContextMiddleware
 from app.routers import config as config_router
 from app.routers import emr, export, jobs, patient
 from app.services.graph_updater import ensure_constraints
+from app.services.queue import start_workers, stop_workers
 
 logger = logging.getLogger(__name__)
 
@@ -35,8 +36,13 @@ async def lifespan(app: FastAPI):
             await asyncio.sleep(2.5)
     if last_err is not None:
         logger.warning("Neo4j constraints not initialised at startup: %s", last_err)
-    yield
-    await asyncio.to_thread(close_driver)
+
+    workers = start_workers()
+    try:
+        yield
+    finally:
+        await stop_workers(workers)
+        await asyncio.to_thread(close_driver)
 
 
 def create_app() -> FastAPI:

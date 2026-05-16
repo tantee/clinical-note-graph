@@ -306,6 +306,19 @@ class FakeStore:
             rows = [a for a in self.ai_outputs if a["document_id"] == did]
             return FakeResult(rows[-1:] if rows else [])
         if " from jobs " in s:
+            # list_jobs path (limit/offset + optional status/type filters)
+            if "lim" in params or "off" in params:
+                rows = list(self.jobs.values())
+                st = params.get("st")
+                tp = params.get("tp")
+                if st is not None:
+                    rows = [r for r in rows if r.get("status") == st]
+                if tp is not None:
+                    rows = [r for r in rows if r.get("type") == tp]
+                rows.sort(key=lambda r: r.get("job_id", ""))
+                offset = int(params.get("off") or 0)
+                limit = int(params.get("lim") or 50)
+                return FakeResult(rows[offset : offset + limit])
             j = self.jobs.get(params.get("j"))
             return FakeResult([j] if j else [])
         if " from app_config" in s:
@@ -358,6 +371,8 @@ def fake_store(monkeypatch):
     monkeypatch.setattr(cfg_router, "db_session", _db_session)
     import app.routers.patient as p_router
     monkeypatch.setattr(p_router, "db_session", _db_session)
+    import app.routers.jobs as jobs_router
+    monkeypatch.setattr(jobs_router, "db_session", _db_session)
     import app.db.helpers as h_mod
     # audit() uses db_session-bound Session.execute via the passed sess, no monkeypatch needed.
     return store
@@ -413,6 +428,12 @@ def app_client(fake_store, stub_neo4j, isolated_vault, monkeypatch):
     from app.services import runtime_config
     monkeypatch.setattr(runtime_config, "_OVERRIDES", {}, raising=False)
     monkeypatch.setattr(runtime_config, "_LOADED_AT", 0.0, raising=False)
+
+    # Disable workers in the TestClient lifespan so they don't race with
+    # tests that mutate `fake_store.jobs` directly.
+    monkeypatch.setenv("QUEUE_WORKERS", "0")
+    from app.config import get_settings
+    get_settings.cache_clear()
 
     from fastapi.testclient import TestClient
     from app.main import create_app

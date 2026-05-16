@@ -9,7 +9,7 @@ from sqlalchemy import text
 from app.db.helpers import j
 from app.db.postgres import db_session
 from app.schemas.emr import EMRIngestRequest
-from app.services.ingest import run_ingest, run_ingest_pipeline
+from app.services.ingest import run_ingest_pipeline
 from app.services.queue import register_handler
 
 logger = logging.getLogger(__name__)
@@ -62,16 +62,6 @@ def create_job(*, type: str, patient_id: str | None, document_id: str | None, pa
             {"jid": job_id, "t": type, "pid": patient_id, "did": document_id, "p": j(payload)},
         )
     return job_id
-
-
-async def run_ingest_job(job_id: str, req: EMRIngestRequest) -> None:
-    _update_job(job_id, status="running", mark_started=True)
-    try:
-        result = await run_ingest(req, job_id=job_id)
-        _update_job(job_id, status="completed", result=result, mark_finished=True)
-    except Exception as exc:
-        logger.exception("Job %s failed: %s", job_id, exc)
-        _update_job(job_id, status="failed", error=str(exc), mark_finished=True)
 
 
 def get_job(job_id: str) -> dict[str, Any] | None:

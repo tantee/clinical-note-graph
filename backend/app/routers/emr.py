@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query
 
 from app.schemas.emr import EMRIngestRequest, EMRIngestResponse
 from app.services.ingest import run_ingest
@@ -12,7 +12,7 @@ router = APIRouter(prefix="/api/emr", tags=["emr"])
 @router.post("/ingest", response_model=EMRIngestResponse)
 async def ingest(
     req: EMRIngestRequest,
-    async_processing: bool = Query(False, alias="async", description="If true, run in background and return jobId"),
+    async_processing: bool = Query(True, alias="async", description="If true (default), enqueue and return jobId; set ?async=false for inline sync"),
 ):
     if async_processing:
         job_id = schedule_ingest(req)
