@@ -53,7 +53,7 @@ def test_full_ingest_to_summary_to_coding(wait_for_backend):
         "source": {"system": "E2E-HIS", "documentId": "e2e-doc-1", "version": "1"},
     }
 
-    r = httpx.post(f"{BASE}/api/emr/ingest", json=payload, headers=_headers(), timeout=60)
+    r = httpx.post(f"{BASE}/api/emr/ingest?async=false", json=payload, headers=_headers(), timeout=120)
     assert r.status_code == 200, r.text
     assert r.json()["patientId"] == "E2E-001"
 
@@ -101,8 +101,8 @@ def test_e2e_idempotent(wait_for_backend):
         "content": "HbA1c 8.0 %. Glucose 180 mg/dL.",
         "source": {"system": "E2E", "documentId": "e2e-doc-lab", "version": "1"},
     }
-    r1 = httpx.post(f"{BASE}/api/emr/ingest", json=payload, headers=_headers(), timeout=60)
-    r2 = httpx.post(f"{BASE}/api/emr/ingest", json=payload, headers=_headers(), timeout=60)
+    r1 = httpx.post(f"{BASE}/api/emr/ingest?async=false", json=payload, headers=_headers(), timeout=120)
+    r2 = httpx.post(f"{BASE}/api/emr/ingest?async=false", json=payload, headers=_headers(), timeout=120)
     assert r1.status_code == 200
     assert r2.status_code == 200
     assert r1.json()["documentId"] == r2.json()["documentId"]
