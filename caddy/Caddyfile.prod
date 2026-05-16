@@ -1,0 +1,48 @@
+# Caddy: production reverse proxy and static-file server.
+#
+# Set CNG_DOMAIN to a real public hostname (e.g. cng.example.com) and Caddy
+# will auto-fetch a Let's Encrypt certificate via the ACME HTTP-01 challenge —
+# ports 80 and 443 must be reachable from the public Internet.
+# Set CADDY_EMAIL for renewal notifications. If CNG_DOMAIN is "localhost" or
+# an IP, Caddy serves plain HTTP only.
+
+{
+    email {$CADDY_EMAIL:admin@example.com}
+    admin off
+}
+
+{$CNG_DOMAIN:localhost} {
+    encode gzip zstd
+
+    @backend {
+        path /api/* /docs* /openapi.json /redoc* /health* /ready*
+    }
+    handle @backend {
+        reverse_proxy backend:8000 {
+            header_up X-Forwarded-Proto {scheme}
+            header_up X-Forwarded-Host {host}
+        }
+    }
+
+    handle {
+        root * /srv
+        try_files {path} /index.html
+        file_server
+
+        @assets path /assets/*
+        header @assets Cache-Control "public, max-age=31536000, immutable"
+    }
+
+    header {
+        X-Frame-Options "SAMEORIGIN"
+        X-Content-Type-Options "nosniff"
+        Referrer-Policy "strict-origin-when-cross-origin"
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+    }
+
+    log {
+        output stdout
+        format console
+        level INFO
+    }
+}

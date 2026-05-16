@@ -66,18 +66,19 @@ docker compose up --build
 
 Endpoints:
 
-| Service | URL |
-|---|---|
-| Backend REST + OpenAPI | http://localhost:8000 · docs at http://localhost:8000/docs |
-| Frontend (Vue/Vuetify) | http://localhost:5173 |
-| Neo4j Browser | http://localhost:7474 (user `neo4j`, password `neo4jpass`) |
-| Postgres | localhost:5432 |
+| Service | URL | Notes |
+|---|---|---|
+| **Unified app (Caddy proxy)** | http://localhost | Recommended. `/` → Vue UI · `/api/*`, `/docs`, `/openapi.json`, `/redoc`, `/health`, `/ready` → backend |
+| Frontend (Vite dev server) | http://localhost:5173 | Direct access; useful for full Vue devtools / HMR |
+| Backend (FastAPI) | http://localhost:8000 · docs at /docs | Bypasses the proxy; handy for `curl` and integration scripts |
+| Neo4j Browser | http://localhost:7474 | user `neo4j`, password `neo4jpass` |
+| Postgres | localhost:5432 | exposed for local tooling |
 
 Try the demo:
 
 ```bash
-./examples/ingest.sh                                       # send sample EMRs
-open http://localhost:5173/#/patients/HN123456             # explore
+./examples/ingest.sh                                       # send sample EMRs (hits the backend directly)
+open http://localhost/#/patients/HN123456                  # explore via the unified Caddy proxy
 ```
 
 ## Configuring the AI provider
@@ -140,20 +141,24 @@ Embeddings: `openai/text-embedding-3-small` is fine; the mock provider returns a
 
 ## Production deployment
 
-A production overlay sits at `docker-compose.prod.yml`. It:
+The production overlay (`docker-compose.prod.yml`) collapses the dev `proxy` + `frontend` services into a single **Caddy** container that:
 
-- removes dev bind-mounts and the uvicorn `--reload`,
-- runs the frontend as a multi-stage nginx-served static bundle (port 80),
-- closes the Postgres / Neo4j / backend ports to the outside (only nginx is exposed),
+- compiles the frontend at image-build time and serves the static bundle from `/srv`,
+- reverse-proxies `/api/*`, `/docs`, `/openapi.json`, `/redoc`, `/health`, `/ready` to the backend on the internal docker network,
+- handles TLS termination — when `CNG_DOMAIN` is a real public hostname, Caddy auto-fetches a Let's Encrypt cert via ACME HTTP-01 (ports 80 and 443 must be Internet-reachable),
+- gzip/zstd-encodes responses, immutable-caches hashed assets, sets HSTS + `X-Frame-Options` + `X-Content-Type-Options` + `Referrer-Policy`,
+- closes Postgres / Neo4j / backend ports to the outside (only the proxy is exposed),
 - enforces a CORS allowlist and an `X-API-Key` header on protected endpoints,
 - adds health-checks to every service and `restart: always`.
 
 Required env vars for prod:
 
 ```env
-VITE_API_BASE=https://api.cng.example.com      # public backend URL baked into the frontend bundle
-FRONTEND_ORIGIN=https://cng.example.com         # CORS allowlist for the backend
-BACKEND_API_KEY=<long random secret>            # required for /api/emr, /api/config, /api/export, /api/facts
+CNG_DOMAIN=cng.example.com                     # Caddy serves this host; auto-TLS via Let's Encrypt
+CADDY_EMAIL=ops@example.com                    # cert renewal notifications
+VITE_API_BASE=https://cng.example.com          # baked into the frontend bundle; same host since Caddy fronts both
+FRONTEND_ORIGIN=https://cng.example.com        # CORS allowlist for the backend
+BACKEND_API_KEY=<long random secret>           # required for /api/emr, /api/config, /api/export, /api/facts
 UVICORN_WORKERS=4
 ```
 
@@ -161,7 +166,15 @@ UVICORN_WORKERS=4
 docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
 ```
 
-Operational endpoints: `GET /health` (always 200 when process is up), `GET /ready` (200 only when Postgres responds). Every response includes an `X-Request-ID` header that also appears in JSON 500/422 bodies for tracing.
+Local prod testing without a real domain: set `CNG_DOMAIN=localhost` and Caddy serves plain HTTP on :80. Useful for smoke-testing the prod overlay before pointing DNS.
+
+Operational endpoints (served through the same Caddy proxy):
+
+- `GET /health` — 200 whenever the backend process is up.
+- `GET /ready` — 200 only when Postgres responds.
+- Every response includes an `X-Request-ID` header that also appears in JSON 500/422 bodies for tracing.
+
+If you'd rather run nginx than Caddy as the front-door, the Caddyfiles are short — swap them for an equivalent `server { … proxy_pass http://backend:8000; … }` block and use `proxy_pass http://frontend:5173` (or `root /srv` in prod). Caddy was chosen here because the auto-HTTPS path is one config line and one env var.
 
 ---
 

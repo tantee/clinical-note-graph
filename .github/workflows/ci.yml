@@ -100,9 +100,9 @@ jobs:
       - name: Boot stack
         run: |
           cp .env.example .env
-          docker compose up -d --build postgres neo4j backend
+          docker compose up -d --build postgres neo4j backend proxy
 
-      - name: Wait for backend /health
+      - name: Wait for backend /health (direct)
         run: |
           for i in $(seq 1 60); do
             if curl -fsS http://localhost:8000/health >/dev/null 2>&1; then
@@ -114,9 +114,21 @@ jobs:
           docker compose logs backend | tail -120
           exit 1
 
-      - name: Run E2E suite inside the backend container
+      - name: Verify Caddy front-door routing
         run: |
-          docker compose exec -T -e CNG_E2E=1 -e CNG_BASE_URL=http://localhost:8000 backend \
+          for i in $(seq 1 30); do
+            if curl -fsS http://localhost/health >/dev/null 2>&1; then
+              echo "proxy up"; exit 0
+            fi
+            sleep 2
+          done
+          echo "proxy never came up"
+          docker compose logs proxy | tail -120
+          exit 1
+
+      - name: Run E2E suite inside the backend container (via proxy)
+        run: |
+          docker compose exec -T -e CNG_E2E=1 -e CNG_BASE_URL=http://proxy backend \
             pytest tests/test_e2e_smoke.py -v
 
       - name: Backend logs on failure

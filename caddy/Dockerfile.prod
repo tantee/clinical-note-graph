@@ -1,0 +1,18 @@
+# Build the frontend, then bake it into a Caddy image that also runs the reverse proxy.
+# Build context is the repo root: `docker compose -f docker-compose.prod.yml build proxy`.
+
+FROM node:20-alpine AS builder
+WORKDIR /app
+COPY frontend/package.json frontend/package-lock.json* ./
+RUN npm ci --no-audit --no-fund
+COPY frontend/. .
+ARG VITE_API_BASE=
+ENV VITE_API_BASE=$VITE_API_BASE
+RUN npm run build
+
+FROM caddy:2-alpine
+COPY --from=builder /app/dist /srv
+COPY caddy/Caddyfile.prod /etc/caddy/Caddyfile
+EXPOSE 80 443
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD wget -qO- http://127.0.0.1/health || exit 1

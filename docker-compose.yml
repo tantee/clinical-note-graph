@@ -82,7 +82,9 @@ services:
     depends_on:
       - backend
     environment:
-      VITE_API_BASE: ${VITE_API_BASE:-http://localhost:8000}
+      # Point axios at the Caddy front-door so direct :5173 access and
+      # proxied :80 access both reach the backend the same way.
+      VITE_API_BASE: ${VITE_API_BASE:-http://localhost}
     ports:
       - "${FRONTEND_PORT:-5173}:5173"
     volumes:
@@ -91,8 +93,24 @@ services:
     command: npm run dev -- --host 0.0.0.0
     restart: unless-stopped
 
+  proxy:
+    image: caddy:2-alpine
+    container_name: cng-proxy
+    depends_on:
+      - backend
+      - frontend
+    ports:
+      - "${PROXY_PORT:-80}:80"
+    volumes:
+      - ./caddy/Caddyfile.dev:/etc/caddy/Caddyfile:ro
+      - caddydata:/data
+      - caddyconfig:/config
+    restart: unless-stopped
+
 volumes:
   pgdata:
   neo4jdata:
   neo4jlogs:
   vaultdata:
+  caddydata:
+  caddyconfig:
