@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import logging
 import uuid
 from typing import Any
@@ -10,11 +9,19 @@ from sqlalchemy import text
 from app.db.helpers import j
 from app.db.postgres import db_session
 from app.schemas.emr import EMRIngestRequest
-from app.services.ingest import run_ingest
+from app.services.ingest import run_ingest, run_ingest_pipeline
+from app.services.queue import register_handler
 
 logger = logging.getLogger(__name__)
 
-_BACKGROUND_TASKS: set[asyncio.Task] = set()
+
+async def _emr_ingest_handler(job: dict, on_progress) -> dict:
+    payload = job["payload"]
+    req = EMRIngestRequest.model_validate(payload)
+    return await run_ingest_pipeline(req, job_id=str(job["job_id"]), on_progress=on_progress)
+
+
+register_handler("emr_ingest", _emr_ingest_handler)
 
 
 def _update_job(job_id: str, *, status: str, result: dict | None = None, error: str | None = None,
@@ -90,7 +97,4 @@ def schedule_ingest(req: EMRIngestRequest) -> str:
         document_id=(req.source.documentId if req.source else None),
         payload=req.model_dump(mode="json"),
     )
-    task = asyncio.create_task(run_ingest_job(job_id, req))
-    _BACKGROUND_TASKS.add(task)
-    task.add_done_callback(_BACKGROUND_TASKS.discard)
     return job_id

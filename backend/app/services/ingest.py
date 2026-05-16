@@ -4,7 +4,7 @@ import asyncio
 import json
 import logging
 import uuid
-from typing import Any
+from typing import Any, Callable
 
 from pydantic import ValidationError
 from sqlalchemy import text
@@ -210,12 +210,18 @@ def _persist_post_extraction(*, patient: dict[str, Any], encounter: dict[str, An
               payload={"count": len(rows)})
 
 
-async def run_ingest(req: EMRIngestRequest, *, job_id: str | None = None) -> dict[str, Any]:
+async def run_ingest_pipeline(
+    req: EMRIngestRequest,
+    *,
+    job_id: str | None = None,
+    on_progress: Callable[..., None] = lambda *a, **k: None,
+) -> dict[str, Any]:
     settings = effective_settings()
     patient, encounter, document, text_for_ai, _raw_json = await asyncio.to_thread(_persist_pre_extraction, req)
+    on_progress("stage_persisted", patientId=patient["patientId"], documentId=document["documentId"])
 
     provider = get_ai_provider(settings)
-    raw_output, _ai_rec = await provider.extract(
+    raw_output, ai_rec = await provider.extract(
         patient_id=patient["patientId"],
         encounter_type=encounter["type"],
         encounter_dt=str(encounter["dateTime"]),
@@ -226,6 +232,14 @@ async def run_ingest(req: EMRIngestRequest, *, job_id: str | None = None) -> dic
     raw_output.setdefault("patientId", patient["patientId"])
     raw_output["documentId"] = document["documentId"]
     raw_output["encounterId"] = encounter["encounterId"]
+    on_progress(
+        "stage_ai_extract",
+        model=ai_rec.model,
+        prompt_tokens=ai_rec.prompt_tokens,
+        completion_tokens=ai_rec.completion_tokens,
+        latency_ms=ai_rec.latency_ms,
+        cost_usd=str(ai_rec.cost_usd) if ai_rec.cost_usd is not None else None,
+    )
 
     valid = True
     errors: list[Any] = []
@@ -244,16 +258,39 @@ async def run_ingest(req: EMRIngestRequest, *, job_id: str | None = None) -> dic
         patient=patient, encounter=encounter, document=document,
         extraction=extraction, valid=valid, errors=errors,
     )
+    on_progress(
+        "stage_facts",
+        valid=valid,
+        count=(
+            0
+            if not valid
+            else sum(
+                [
+                    len(extraction.problems),
+                    len(extraction.medications),
+                    len(extraction.observations),
+                    len(extraction.procedures),
+                    len(extraction.allergies),
+                    len(extraction.plans),
+                    len(extraction.diagnoses),
+                    len(extraction.codingCandidates),
+                ]
+            )
+        ),
+    )
 
     graph_counts: dict[str, Any] = {}
     md_written: dict[str, str] = {}
     if valid:
-        graph_task = asyncio.to_thread(update_graph_for_document, patient, encounter, document, extraction)
-        md_task = asyncio.to_thread(generate_markdown,
-                                    patient=patient, encounter=encounter, document=document,
-                                    raw_content=text_for_ai, extraction=extraction)
         try:
+            graph_task = asyncio.to_thread(update_graph_for_document, patient, encounter, document, extraction)
+            md_task = asyncio.to_thread(
+                generate_markdown,
+                patient=patient, encounter=encounter, document=document,
+                raw_content=text_for_ai, extraction=extraction,
+            )
             graph_counts, md_written = await asyncio.gather(graph_task, md_task)
+            on_progress("stage_graph_and_markdown", counts=graph_counts, files=len(md_written))
         except Exception as exc:
             logger.exception("Post-extraction side-effect failed: %s", exc)
             graph_counts = {"error": str(exc)}
@@ -272,6 +309,7 @@ async def run_ingest(req: EMRIngestRequest, *, job_id: str | None = None) -> dic
                     for path, content in md_written.items()
                 ],
             )
+            on_progress("stage_embed", count=len(md_written) + len(extraction.problems[:50]))
         except Exception as exc:
             logger.warning("Embedding step failed: %s", exc)
 
@@ -293,3 +331,8 @@ async def run_ingest(req: EMRIngestRequest, *, job_id: str | None = None) -> dic
             "markdownFiles": sorted(md_written.keys()),
         },
     }
+
+
+async def run_ingest(req: EMRIngestRequest, *, job_id: str | None = None) -> dict[str, Any]:
+    """Backwards-compat alias used by the synchronous (`?async=false`) path."""
+    return await run_ingest_pipeline(req, job_id=job_id)
