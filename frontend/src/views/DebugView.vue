@@ -53,7 +53,56 @@
       </v-window-item>
 
       <v-window-item value="calls">
-        <v-alert type="info" variant="tonal">AI calls view — coming in Task 16.</v-alert>
+        <v-card>
+          <SectionHeader title="AI calls" icon="mdi-text-box-search-outline">
+            <template #actions>
+              <v-text-field
+                v-model="callsQ"
+                density="compact"
+                placeholder="Search error / model"
+                prepend-inner-icon="mdi-magnify"
+                hide-details
+                style="max-width: 280px"
+              />
+              <v-select
+                v-model="callsStatus"
+                :items="['', 'ok', 'failed']"
+                label="Status"
+                density="compact"
+                hide-details
+                style="max-width: 130px; margin-left: 8px;"
+                clearable
+              />
+              <v-btn variant="text" prepend-icon="mdi-download" :href="csvUrl" target="_blank">CSV</v-btn>
+            </template>
+          </SectionHeader>
+          <v-divider />
+          <v-data-table
+            density="comfortable"
+            :headers="callsHeaders"
+            :items="callsRows"
+            :loading="callsLoading"
+            @click:row="onCallClick"
+          >
+            <template #item.cost_usd="{ item }">{{ formatUSD(item.cost_usd) }}</template>
+            <template #item.prompt_tokens="{ item }">{{ formatTokens(item.prompt_tokens) }}</template>
+            <template #item.completion_tokens="{ item }">{{ formatTokens(item.completion_tokens) }}</template>
+            <template #item.error="{ item }">
+              <v-chip v-if="item.error" size="x-small" color="error" variant="tonal">err</v-chip>
+              <v-chip v-else size="x-small" color="success" variant="tonal">ok</v-chip>
+            </template>
+          </v-data-table>
+        </v-card>
+
+        <v-navigation-drawer v-model="callDrawer" location="right" width="600" temporary>
+          <v-card flat>
+            <SectionHeader title="AI call detail" icon="mdi-information-outline" />
+            <v-divider />
+            <v-card-text v-if="selectedCall">
+              <pre class="cng-raw">{{ JSON.stringify(selectedCall, null, 2) }}</pre>
+            </v-card-text>
+          </v-card>
+        </v-navigation-drawer>
       </v-window-item>
       <v-window-item value="jobs">
         <v-alert type="info" variant="tonal">Jobs view — coming in Task 17.</v-alert>
@@ -63,8 +112,8 @@
 </template>
 
 <script setup>
-import { computed, onMounted, ref } from 'vue'
-import { getDebugSummary, getDebugByModel, getDebugByDay } from '../api/client.js'
+import { computed, onMounted, ref, watch } from 'vue'
+import { getDebugSummary, getDebugByModel, getDebugByDay, listAiCalls, getAiCall } from '../api/client.js'
 import { formatTokens, formatUSD } from '../utils/format.js'
 import SectionHeader from '../components/SectionHeader.vue'
 import BarChart from '../components/BarChart.vue'
@@ -118,6 +167,53 @@ const byDayChart = computed(() => {
     })),
   }
 })
+
+const callsHeaders = [
+  { title: 'Time',     key: 'created_at' },
+  { title: 'Type',     key: 'call_type' },
+  { title: 'Model',    key: 'model' },
+  { title: 'Prompt',   key: 'prompt_tokens', align: 'end' },
+  { title: 'Compl.',   key: 'completion_tokens', align: 'end' },
+  { title: 'Latency',  key: 'latency_ms', align: 'end' },
+  { title: 'Cost',     key: 'cost_usd', align: 'end' },
+  { title: 'Status',   key: 'error' },
+]
+
+const callsRows = ref([])
+const callsLoading = ref(false)
+const callsQ = ref('')
+const callsStatus = ref('')
+const callDrawer = ref(false)
+const selectedCall = ref(null)
+
+const csvUrl = computed(() => {
+  const p = new URLSearchParams(rangeParams())
+  if (callsQ.value) p.set('q', callsQ.value)
+  if (callsStatus.value) p.set('status', callsStatus.value)
+  return (import.meta.env.VITE_API_BASE || '') + '/api/debug/ai-calls.csv?' + p.toString()
+})
+
+async function loadCalls() {
+  callsLoading.value = true
+  try {
+    callsRows.value = await listAiCalls({
+      ...rangeParams(),
+      q: callsQ.value || undefined,
+      status: callsStatus.value || undefined,
+      limit: 200,
+    })
+  } finally { callsLoading.value = false }
+}
+
+async function onCallClick(_, ctx) {
+  const item = ctx?.item
+  if (!item?.id) return
+  selectedCall.value = await getAiCall(item.id)
+  callDrawer.value = true
+}
+
+watch(tab, (t) => { if (t === 'calls') loadCalls() })
+watch([callsQ, callsStatus], loadCalls)
 
 onMounted(reload)
 </script>
