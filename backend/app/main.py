@@ -42,7 +42,7 @@ async def lifespan(app: FastAPI):
 def create_app() -> FastAPI:
     settings = get_settings()
     app = FastAPI(
-        title="Clinical Graph Notes",
+        title="Clinical Note Graph",
         version="0.1.0",
         description=(
             "Receives EMR documents, extracts structured clinical facts via AI, "
@@ -64,7 +64,7 @@ def create_app() -> FastAPI:
 
     @app.get("/health")
     def health():
-        return {"status": "ok", "service": "clinical-graph-notes", "aiProvider": get_settings().AI_PROVIDER}
+        return {"status": "ok", "service": "clinical-note-graph", "aiProvider": get_settings().AI_PROVIDER}
 
     @app.get("/ready")
     async def ready():

@@ -3,7 +3,7 @@
     <v-app-bar density="comfortable" :elevation="1" color="surface">
       <v-app-bar-title class="font-weight-bold d-flex align-center">
         <v-icon class="mr-2" color="primary">mdi-graph-outline</v-icon>
-        <span class="text-body-1">Clinical Graph Notes</span>
+        <span class="text-body-1">Clinical Note Graph</span>
         <v-chip size="x-small" class="ml-3" color="warning" variant="tonal" prepend-icon="mdi-alert-decagram-outline">
           AI-assisted · review required
         </v-chip>

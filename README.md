@@ -1,4 +1,4 @@
-# Clinical Graph Notes
+# Clinical Note Graph
 
 [![CI](https://github.com/tantee/clinical-note-graph/actions/workflows/ci.yml/badge.svg)](https://github.com/tantee/clinical-note-graph/actions/workflows/ci.yml)
 

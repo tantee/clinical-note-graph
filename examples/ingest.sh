@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Examples for using the Clinical Graph Notes API.
+# Examples for using the Clinical Note Graph API.
 # Requires: jq, curl. The backend must be running (default :8000).
 
 set -euo pipefail
