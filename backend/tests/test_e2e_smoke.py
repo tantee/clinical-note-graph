@@ -106,3 +106,33 @@ def test_e2e_idempotent(wait_for_backend):
     assert r1.status_code == 200
     assert r2.status_code == 200
     assert r1.json()["documentId"] == r2.json()["documentId"]
+
+
+def test_async_ingest_polls_to_completion(wait_for_backend):
+    payload = {
+        "patient": {"patientId": "E2E-Q1"},
+        "encounter": {"type": "admission", "dateTime": "2026-05-15T10:00:00+07:00"},
+        "format": "text",
+        "content": "Patient with Type 2 diabetes mellitus.",
+        "source": {"system": "E2E", "documentId": "e2e-q1", "version": "1"},
+    }
+    r = httpx.post(f"{BASE}/api/emr/ingest", json=payload, headers=_headers(), timeout=60)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["status"] == "queued"
+    job_id = body["jobId"]
+
+    deadline = time.time() + 90
+    final = None
+    while time.time() < deadline:
+        j = httpx.get(f"{BASE}/api/jobs/{job_id}", headers=_headers(), timeout=10).json()
+        if j["status"] in ("completed", "failed"):
+            final = j
+            break
+        time.sleep(1)
+
+    assert final is not None, "job did not finish within 90 seconds"
+    assert final["status"] == "completed", f"job failed: {final.get('error')}"
+
+    s = httpx.get(f"{BASE}/api/debug/summary", headers=_headers(), timeout=10).json()
+    assert s["total_calls"] >= 1
