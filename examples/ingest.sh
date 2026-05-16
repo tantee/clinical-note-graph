@@ -7,7 +7,7 @@ BASE="${BASE:-http://localhost:8000}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 echo "→ Ingest admission note (text)"
-curl -sS -X POST "$BASE/api/emr/ingest" \
+curl -sS -X POST "$BASE/api/emr/ingest?async=false" \
   -H 'Content-Type: application/json' \
   -d @- <<JSON | jq .
 {
@@ -21,7 +21,7 @@ JSON
 
 echo ""
 echo "→ Ingest progress note (text)"
-curl -sS -X POST "$BASE/api/emr/ingest" \
+curl -sS -X POST "$BASE/api/emr/ingest?async=false" \
   -H 'Content-Type: application/json' \
   -d @- <<JSON | jq .
 {
@@ -35,7 +35,7 @@ JSON
 
 echo ""
 echo "→ Ingest FHIR bundle"
-curl -sS -X POST "$BASE/api/emr/ingest" \
+curl -sS -X POST "$BASE/api/emr/ingest?async=false" \
   -H 'Content-Type: application/json' \
   -d @- <<JSON | jq .
 {

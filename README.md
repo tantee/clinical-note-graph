@@ -178,6 +178,47 @@ If you'd rather run nginx than Caddy as the front-door, the Caddyfiles are short
 
 ---
 
+## Async ingest
+
+`POST /api/emr/ingest` defaults to **asynchronous** processing. The request returns immediately with:
+
+```json
+{ "jobId": "…", "status": "queued", "patientId": "HN1", "encounterId": "", "documentId": "doc-001", "summary": null }
+```
+
+Poll `GET /api/jobs/{jobId}` until the status is `completed` or `failed`. The `progress` JSONB field on the job row updates per stage (`stage_persisted` → `stage_ai_extract` → `stage_facts` → `stage_graph_and_markdown` → `stage_embed`), and `stage_ai_extract` carries the model, tokens, latency, and cost. The UI's `JobWatcher` component shows this live.
+
+For inline behaviour (no queue), append `?async=false`:
+
+```bash
+curl -X POST 'http://localhost/api/emr/ingest?async=false' -H 'Content-Type: application/json' -d @body.json
+```
+
+The sync response includes a `summary` block with the extracted counts and a list of generated Markdown files. Used by `examples/ingest.sh`.
+
+---
+
+## Cost tracking
+
+Every AI call is metered into the `ai_outputs` table: `prompt_tokens`, `completion_tokens`, `total_tokens`, `latency_ms`, `cost_usd`. Cost is computed at write time using rates from the `model_pricing` table, which:
+
+- Ships with seed rows for current major models (gpt-4o, gpt-4o-mini, claude-3.5-sonnet/haiku, gemini-2.0-flash, deepseek-chat, text-embedding-3-small, …).
+- Is editable per-row in the Config page (Model pricing card).
+- Supports a single-click "Refresh from OpenRouter" button that fetches `https://openrouter.ai/api/v1/models` and upserts pricing for any matching IDs.
+
+Models without a pricing row record a NULL cost and the debug page renders `?` in the Cost column. The mock provider is seeded at $0 so dev runs don't inflate spend totals.
+
+The Debug page (`/#/debug`) surfaces:
+
+- Total spend / AI calls / avg latency / failures over a chosen date range.
+- Per-model breakdown table (calls, tokens, cost).
+- A virtualised AI-calls log with model / status / text filters, plus a streamed CSV export.
+- A jobs view with a re-queue button for failed jobs.
+
+All `/api/debug/*` endpoints are protected by the same `X-API-Key` middleware as `/api/config` and `/api/emr`.
+
+---
+
 ## API surface
 
 | Verb | Path | Purpose |
@@ -198,6 +239,18 @@ If you'd rather run nginx than Caddy as the front-door, the Caddyfiles are short
 | POST | `/api/export` | summary · coding · graph · markdown_vault (zip) · fhir_bundle · custom (uses export profile) |
 | GET/PATCH | `/api/config` | Read effective settings (masked secrets), patch overrides |
 | GET/PUT/DELETE | `/api/config/export-profiles[/{id}]` | Manage export profiles |
+| GET  | `/api/jobs?status=&type=&limit=&offset=` | List background jobs (queue) |
+| POST | `/api/jobs/{id}/requeue`                 | Reset a failed job to pending |
+| GET  | `/api/debug/summary?start=&end=`         | KPI totals over a range |
+| GET  | `/api/debug/by-model?start=&end=`        | Per-model breakdown |
+| GET  | `/api/debug/by-day?start=&end=`          | Stacked-bar dataset |
+| GET  | `/api/debug/ai-calls?…`                  | AI call log (filterable) |
+| GET  | `/api/debug/ai-calls/{id}`               | Single call detail |
+| GET  | `/api/debug/ai-calls.csv?…`              | Streamed CSV export |
+| GET  | `/api/config/pricing`                    | List model rates |
+| PUT  | `/api/config/pricing/{model}`            | Upsert one rate |
+| DEL  | `/api/config/pricing/{model}`            | Delete a rate |
+| POST | `/api/config/pricing/refresh-openrouter` | Refresh rates from OpenRouter |
 
 Full schema at `http://localhost:8000/docs` (OpenAPI).
 
