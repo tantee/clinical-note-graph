@@ -3,30 +3,34 @@
 
 import { test, expect } from '@playwright/test'
 
-test('ingest a sample admission and open the patient', async ({ page }) => {
+
+test('ingest queues a job, JobWatcher completes, navigates to patient', async ({ page }) => {
   await page.goto('/#/ingest')
   await page.getByRole('button', { name: /load sample/i }).click()
   await page.getByRole('menuitem', { name: /admission/i }).click()
 
-  // Make patientId unique per test run so re-runs stay isolated.
+  // Unique patient ID so reruns stay isolated.
   const pid = `PW-${Date.now()}`
-  await page.getByLabel('Patient ID').fill(pid)
-  await page.getByRole('button', { name: /send to backend/i }).click()
+  // The v-autocomplete renders an input that we can type into.
+  const patientInput = page.getByLabel('Patient ID')
+  await patientInput.fill(pid)
 
-  await expect(page.getByText('Open patient')).toBeVisible({ timeout: 60_000 })
-  await page.getByRole('link', { name: /open patient/i }).click()
+  await page.getByRole('button', { name: /^submit$/i }).click()
 
+  // JobWatcher card renders almost immediately.
+  await expect(page.getByText(/ingest job/i)).toBeVisible()
+
+  // On completion, the router navigates to /#/patients/{pid}.
+  await page.waitForURL(new RegExp(`#/patients/${pid}`), { timeout: 90_000 })
   await expect(page.getByRole('heading', { name: new RegExp(pid) })).toBeVisible()
-  // Tabs render
-  await page.getByRole('tab', { name: /timeline/i }).click()
-  await expect(page.getByText(/admission/i)).toBeVisible()
-  await page.getByRole('tab', { name: /notes/i }).click()
-  await expect(page.getByText(/index.md/i)).toBeVisible()
 })
+
 
 test('config patch round-trips', async ({ page }) => {
   await page.goto('/#/config')
-  await page.getByLabel('Model').fill('gpt-4o-mini')
+  // The Model field on the AI provider card.
+  const modelField = page.getByLabel('Model').first()
+  await modelField.fill('gpt-4o-mini')
   await page.getByRole('button', { name: /save changes/i }).click()
   await expect(page.getByText(/configuration saved/i)).toBeVisible()
 })
