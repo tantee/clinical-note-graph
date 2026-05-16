@@ -1,34 +1,51 @@
 <template>
   <div>
-    <div class="mb-4">
-      <h1 class="text-h5 font-weight-bold mb-1">Ingest EMR document</h1>
-      <div class="text-body-2 text-grey-darken-1">
-        Send any clinical document (text, JSON, or FHIR bundle). The server normalises it,
-        calls AI for extraction, validates the JSON schema, and updates Postgres + Neo4j + the Markdown vault.
-      </div>
+    <h1 class="text-h5 font-weight-bold mb-1">Ingest EMR document</h1>
+    <div class="text-body-2 text-grey-darken-1 mb-4">
+      Type or paste a clinical note. If the Patient ID matches an existing patient we update their record;
+      otherwise a new patient is created.
     </div>
 
     <v-row>
       <v-col cols="12" md="5">
         <v-card>
-          <SectionHeader title="Document metadata" icon="mdi-information-outline" />
+          <SectionHeader title="Patient" icon="mdi-account-outline" />
           <v-divider />
           <v-card-text>
-            <v-text-field v-model="patientId" label="Patient ID" prepend-inner-icon="mdi-account" required />
+            <v-autocomplete
+              v-model="patientId"
+              :items="patientResults"
+              :loading="patientsLoading"
+              item-title="patient_id"
+              item-value="patient_id"
+              label="Patient ID"
+              :return-object="false"
+              :no-filter="true"
+              clearable
+              @update:search="onSearchPatients"
+            />
+            <div class="text-caption mt-1">
+              <v-icon size="14" :color="existing ? 'success' : 'warning'">
+                {{ existing ? 'mdi-check' : 'mdi-plus' }}
+              </v-icon>
+              {{ existing ? `Updating ${existing.patient_id} — ${existing.name || ''}` : 'New patient will be created' }}
+            </div>
+
+            <v-divider class="my-3" />
             <v-text-field v-model="name" label="Name (optional)" />
             <v-row>
-              <v-col cols="6"><v-select v-model="gender" :items="['male', 'female', 'other']" label="Gender" clearable /></v-col>
+              <v-col cols="6"><v-select v-model="gender" :items="['male','female','other']" label="Gender" clearable /></v-col>
               <v-col cols="6"><v-text-field v-model="birthDate" label="Birth date (YYYY-MM-DD)" /></v-col>
             </v-row>
-            <v-divider class="my-3" />
+          </v-card-text>
+
+          <SectionHeader title="Encounter" icon="mdi-file-document-outline" />
+          <v-divider />
+          <v-card-text>
             <v-text-field v-model="encounterId" label="Encounter ID (optional)" />
             <v-row>
-              <v-col cols="6">
-                <v-select v-model="encType" :items="ENCOUNTER_TYPES" label="Encounter type" />
-              </v-col>
-              <v-col cols="6">
-                <v-text-field v-model="encDateTime" label="Encounter dateTime (ISO)" />
-              </v-col>
+              <v-col cols="6"><v-select v-model="encType" :items="ENCOUNTER_TYPES" label="Encounter type" /></v-col>
+              <v-col cols="6"><v-text-field v-model="encDateTime" label="Encounter dateTime (ISO)" /></v-col>
             </v-row>
             <v-row>
               <v-col cols="6"><v-text-field v-model="department" label="Department" /></v-col>
@@ -42,15 +59,15 @@
             </v-row>
             <v-text-field v-model="system" label="Source system" />
           </v-card-text>
-          <v-divider />
+
           <v-card-actions class="px-4 pb-4">
             <v-btn color="primary" :loading="loading" prepend-icon="mdi-cloud-upload-outline" @click="submit">
-              Send to backend
+              Submit
             </v-btn>
             <v-spacer />
             <v-menu>
-              <template #activator="{ props }">
-                <v-btn v-bind="props" variant="text" prepend-icon="mdi-file-document-outline">Load sample</v-btn>
+              <template #activator="{ props: menuProps }">
+                <v-btn v-bind="menuProps" variant="text" prepend-icon="mdi-file-document-outline">Load sample</v-btn>
               </template>
               <v-list density="compact">
                 <v-list-item @click="fillAdmission">Admission note</v-list-item>
@@ -65,10 +82,8 @@
 
       <v-col cols="12" md="7">
         <v-card>
-          <SectionHeader title="EMR content" icon="mdi-text-box-outline">
-            <template #actions>
-              <v-chip size="x-small" variant="tonal">{{ contentSize }} chars</v-chip>
-            </template>
+          <SectionHeader title="Content" icon="mdi-text-box-outline">
+            <template #actions><v-chip size="x-small" variant="tonal">{{ content.length }} chars</v-chip></template>
           </SectionHeader>
           <v-divider />
           <v-card-text>
@@ -77,74 +92,104 @@
               rows="20"
               auto-grow
               variant="outlined"
-              placeholder="Paste EMR text here, or JSON/FHIR bundle when format != text"
+              placeholder="Paste EMR text here (or JSON/FHIR bundle when format != text)"
               spellcheck="false"
             />
           </v-card-text>
         </v-card>
 
-        <v-card v-if="result" class="mt-4">
-          <SectionHeader title="Result" :icon="result.detail ? 'mdi-alert-circle-outline' : 'mdi-check-circle-outline'" :color="result.detail ? 'error' : 'success'" />
-          <v-divider />
-          <v-card-text>
-            <pre class="cng-raw">{{ JSON.stringify(result, null, 2) }}</pre>
-            <v-btn v-if="result.patientId" color="primary" variant="tonal" class="mt-3" :to="{ name: 'patient', params: { id: result.patientId } }" prepend-icon="mdi-arrow-right">Open patient</v-btn>
-          </v-card-text>
-        </v-card>
+        <JobWatcher
+          v-if="currentJobId"
+          class="mt-4"
+          :jobId="currentJobId"
+          @done="onDone"
+          @failed="onFailed"
+          @retry="submit"
+        />
       </v-col>
     </v-row>
   </div>
 </template>
 
 <script setup>
-import { computed, ref } from 'vue'
-import { ingest } from '../api/client.js'
+import { computed, onMounted, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
+import { ingest, listPatients } from '../api/client.js'
 import { ENCOUNTER_TYPES } from '../constants/clinical.js'
 import { useUiStore } from '../stores/ui.js'
 import SectionHeader from '../components/SectionHeader.vue'
+import JobWatcher from '../components/JobWatcher.vue'
 
 const ui = useUiStore()
+const route = useRoute()
+const router = useRouter()
 
-const patientId = ref('HN123456')
-const name = ref('Somchai Sample')
+const patientId = ref(route.query.patientId || '')
+const name = ref('')
 const gender = ref('male')
-const birthDate = ref('1965-04-12')
+const birthDate = ref('')
 const encounterId = ref('')
 const encType = ref('admission')
 const encDateTime = ref(new Date().toISOString())
-const department = ref('Internal Medicine')
-const provider = ref('Dr. Demo')
+const department = ref('')
+const provider = ref('')
 const format = ref('text')
-const docId = ref('doc-001')
+const docId = ref(`doc-${Date.now()}`)
 const version = ref('1')
-const system = ref('SampleHIS')
+const system = ref('UI')
 const content = ref('')
 const loading = ref(false)
-const result = ref(null)
+const currentJobId = ref(null)
 
-const contentSize = computed(() => content.value?.length || 0)
+const patientResults = ref([])
+const patientsLoading = ref(false)
+const existing = computed(() => patientResults.value.find((p) => p.patient_id === patientId.value))
+
+let searchTimer
+function onSearchPatients(q) {
+  clearTimeout(searchTimer)
+  if (!q) { patientResults.value = []; return }
+  searchTimer = setTimeout(async () => {
+    patientsLoading.value = true
+    try { patientResults.value = await listPatients(q) } finally { patientsLoading.value = false }
+  }, 250)
+}
+
+watch(existing, (e) => {
+  if (e && !name.value) {
+    name.value = e.name || ''
+    gender.value = e.gender || ''
+    birthDate.value = e.birth_date || ''
+  }
+})
+
+function safeJson(s) { try { return JSON.parse(s) } catch { return s } }
 
 async function submit() {
+  if (!patientId.value) { ui.error('Patient ID required'); return }
   loading.value = true
-  result.value = null
+  currentJobId.value = null
   try {
-    const parsedContent = format.value === 'text' ? content.value : safeJson(content.value)
     const body = {
-      patient: { patientId: patientId.value, name: name.value, gender: gender.value, birthDate: birthDate.value || null },
-      encounter: { encounterId: encounterId.value || null, type: encType.value, dateTime: encDateTime.value, department: department.value, provider: provider.value },
+      patient: { patientId: patientId.value, name: name.value || null, gender: gender.value || null, birthDate: birthDate.value || null },
+      encounter: { encounterId: encounterId.value || null, type: encType.value, dateTime: encDateTime.value, department: department.value || null, provider: provider.value || null },
       format: format.value,
-      content: parsedContent,
+      content: format.value === 'text' ? content.value : safeJson(content.value),
       source: { system: system.value, documentId: docId.value, version: version.value },
     }
-    result.value = await ingest(body)
-    ui.success('Document ingested successfully.')
-  } catch (e) {
-    result.value = { error: e.message, detail: e.response?.data }
+    const res = await ingest(body)
+    currentJobId.value = res.jobId
   } finally {
     loading.value = false
   }
 }
-function safeJson(s) { try { return JSON.parse(s) } catch { return s } }
+
+function onDone(result) {
+  ui.success('Document ingested')
+  const pid = result?.patientId || patientId.value
+  if (pid) router.push({ name: 'patient', params: { id: pid } })
+}
+function onFailed(err) { ui.error(`Ingest failed: ${err}`) }
 
 function fillAdmission() {
   content.value = `Admission note
@@ -221,4 +266,6 @@ function fillFHIR() {
     ],
   }, null, 2)
 }
+
+onMounted(() => { if (patientId.value) onSearchPatients(patientId.value) })
 </script>

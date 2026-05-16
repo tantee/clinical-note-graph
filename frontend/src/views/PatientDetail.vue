@@ -16,6 +16,7 @@
         </div>
       </div>
       <v-spacer />
+      <v-btn class="mr-2" variant="text" prepend-icon="mdi-note-plus-outline" :to="{ name: 'ingest', query: { patientId: id } }">Add note</v-btn>
       <v-btn class="mr-2" color="primary" variant="tonal" prepend-icon="mdi-text-box-outline" :loading="busy.summary" @click="loadSummary">Summary</v-btn>
       <v-btn color="primary" variant="tonal" prepend-icon="mdi-medical-bag-outline" :loading="busy.coding" @click="loadCoding">Coding</v-btn>
     </div>
