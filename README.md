@@ -1,5 +1,9 @@
 # Clinical Graph Notes
 
+[![CI](https://github.com/tantee/clinical-note-graph/actions/workflows/ci.yml/badge.svg)](https://github.com/tantee/clinical-note-graph/actions/workflows/ci.yml)
+
+> Repository: <https://github.com/tantee/clinical-note-graph>
+
 A Dockerised prototype that turns inbound EMR documents into:
 
 - a structured **patient knowledge graph** (Neo4j)
@@ -78,11 +82,30 @@ open http://localhost:5173/#/patients/HN123456             # explore
 
 ## Configuring the AI provider
 
-Any OpenAI-compatible endpoint works. The backend speaks the standard `/chat/completions` and `/embeddings` shape, so the provider name `openai` is reused for all of them — only the `AI_BASE_URL` changes.
+Any OpenAI-compatible endpoint works. The backend speaks the standard `/chat/completions` and `/embeddings` shape, so `AI_PROVIDER=openai` is reused for all of them — only the `AI_BASE_URL` changes.
 
-### OpenRouter (recommended for production trials)
+You can configure providers three ways:
+- Edit `.env` and restart `docker compose up`.
+- `PATCH /api/config` — overrides are stored in Postgres and merged into runtime settings without restarting.
+- Visit `/#/config` in the UI and click **Quick setup** — it fills OpenRouter / OpenAI / Groq presets so you only need to paste your key.
 
-OpenRouter exposes hundreds of models — Claude, GPT, Gemini, Llama, Qwen — behind a single OpenAI-compatible API and a single key. It's the cheapest way to compare models without juggling vendor accounts.
+### Provider quick-reference
+
+| Provider | Key URL | `AI_BASE_URL` | Notes |
+|---|---|---|---|
+| **OpenRouter** (recommended) | <https://openrouter.ai/keys> | `https://openrouter.ai/api/v1` | One key → 200+ models incl. Claude, GPT-4o, Gemini, Llama, Qwen. Pay-per-use, no monthly commitment. Embeddings supported via `openai/text-embedding-3-*`. |
+| **OpenAI** | <https://platform.openai.com/api-keys> | `https://api.openai.com/v1` | Native; best for `gpt-4o`, `gpt-4o-mini`, OpenAI embeddings. |
+| **Anthropic via OpenRouter** | as above | as above | Use `AI_MODEL=anthropic/claude-3.5-sonnet` (or `claude-3.7-sonnet`, `claude-3.5-haiku`). Direct Anthropic API uses a different schema and isn't supported by this backend yet. |
+| **Google Gemini via OpenRouter** | as above | as above | Use `AI_MODEL=google/gemini-2.0-flash-001` or `google/gemini-2.5-pro`. |
+| **Groq** | <https://console.groq.com/keys> | `https://api.groq.com/openai/v1` | Very fast inference; good for `llama-3.3-70b-versatile`, `qwen-2.5-72b`. No embedding endpoint — leave `AI_EMBEDDING_MODEL` blank or point at OpenAI for embeddings. |
+| **DeepSeek** | <https://platform.deepseek.com/api_keys> | `https://api.deepseek.com/v1` | Cheap; use `deepseek-chat` (V3) or `deepseek-reasoner` (R1). Reasoner is slow but good at structured extraction. |
+| **Azure OpenAI** | Azure portal | `https://<resource>.openai.azure.com/openai/deployments/<deployment>` | Set `AI_MODEL` to your deployment name. |
+| **Local (vLLM / LM Studio / Ollama)** | n/a | `http://host:port/v1` | Any OpenAI-compatible self-hosted server. From a container, use `host.docker.internal` or the LAN IP. |
+| **Mock / offline** | n/a | leave blank, set `AI_PROVIDER=mock` | Deterministic keyword-based extractor with ICD-10 / SNOMED / LOINC / RxNorm lookups. Runs without a key. |
+
+### OpenRouter setup (recommended)
+
+OpenRouter exposes hundreds of models behind a single key, including the latest Claude, GPT, Gemini, Llama, Qwen, and DeepSeek. The cheapest way to compare models without juggling vendor accounts.
 
 1. Get an API key at <https://openrouter.ai/keys>.
 2. Edit `.env`:
@@ -91,30 +114,27 @@ OpenRouter exposes hundreds of models — Claude, GPT, Gemini, Llama, Qwen — b
    AI_PROVIDER=openai
    AI_BASE_URL=https://openrouter.ai/api/v1
    AI_API_KEY=sk-or-v1-…
-   AI_MODEL=anthropic/claude-3.5-sonnet         # or openai/gpt-4o-mini, google/gemini-2.0-flash-001, …
+   AI_MODEL=anthropic/claude-3.5-sonnet
    AI_EMBEDDING_MODEL=openai/text-embedding-3-small
    ```
 
-3. `docker compose up --build`. Or change it live without restart from the **Config** page in the UI — there's a Quick-setup menu that fills these fields for OpenRouter / OpenAI / Groq.
+3. `docker compose up --build`. Or change it live without restart via the Config page or:
 
-You can also `PATCH /api/config` to switch providers without restarting:
+   ```bash
+   curl -X PATCH http://localhost:8000/api/config \
+     -H 'Content-Type: application/json' \
+     -d '{"AI_PROVIDER":"openai","AI_BASE_URL":"https://openrouter.ai/api/v1","AI_API_KEY":"sk-or-v1-...","AI_MODEL":"anthropic/claude-3.5-sonnet"}'
+   ```
 
-```bash
-curl -X PATCH http://localhost:8000/api/config \
-  -H 'Content-Type: application/json' \
-  -d '{"AI_PROVIDER":"openai","AI_BASE_URL":"https://openrouter.ai/api/v1","AI_API_KEY":"sk-or-v1-...","AI_MODEL":"anthropic/claude-3.5-sonnet"}'
-```
+### Model picks by task
 
-### Other endpoints
+The strict-JSON extraction step (`/api/emr/ingest`) is the heaviest call. It's where you want a model that follows JSON schemas tightly. Suggested defaults:
 
-| Provider | `AI_BASE_URL` | Example `AI_MODEL` |
-|---|---|---|
-| OpenAI | `https://api.openai.com/v1` | `gpt-4o-mini` |
-| Groq | `https://api.groq.com/openai/v1` | `llama-3.3-70b-versatile` |
-| Self-hosted (vLLM, LM Studio, Ollama) | `http://host:port/v1` | whatever you served |
-| Mock / offline | leave blank, set `AI_PROVIDER=mock` | n/a |
+- **Best quality:** `anthropic/claude-3.5-sonnet` (via OpenRouter) or `gpt-4o`. Good clinical entity recognition, holds the schema.
+- **Cheap and fast:** `gpt-4o-mini`, `google/gemini-2.0-flash-001`, or `anthropic/claude-3.5-haiku`. The mock extractor is a useful baseline — start there to confirm the pipeline before paying for tokens.
+- **Reasoning-heavy edge cases:** `deepseek-reasoner` or `openai/o4-mini`. Slower, but better at resolving contradictions across documents.
 
-The mock provider is deterministic — it does ICD-10 / SNOMED / LOINC / RxNorm lookups against a small built-in keyword table, so the whole stack runs offline with no key and produces stable test fixtures.
+Embeddings: `openai/text-embedding-3-small` is fine; the mock provider returns an empty vector so the pgvector pipeline cleanly skips inserts when no embedding model is configured.
 
 ---
 
