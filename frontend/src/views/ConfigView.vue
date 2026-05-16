@@ -93,6 +93,10 @@
       </v-col>
 
       <v-col cols="12">
+        <PricingTable />
+      </v-col>
+
+      <v-col cols="12">
         <v-card>
           <SectionHeader title="Export profiles" icon="mdi-file-export-outline" />
           <v-divider />
@@ -142,6 +146,7 @@ import { getConfig, patchConfig, listExportProfiles, upsertExportProfile } from 
 import { useUiStore } from '../stores/ui.js'
 import SectionHeader from '../components/SectionHeader.vue'
 import EmptyState from '../components/EmptyState.vue'
+import PricingTable from '../components/PricingTable.vue'
 
 const ui = useUiStore()
 
