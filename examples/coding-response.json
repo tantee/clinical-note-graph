@@ -1,0 +1,53 @@
+{
+  "patientId": "HN123456",
+  "primaryDiagnosis": {
+    "condition": "Acute myocardial infarction",
+    "icd10": "I21.9",
+    "snomed": "22298006",
+    "rationale": "Mentioned in admission note near: 'NSTEMI to rule out, ST depression V4-V6...'",
+    "evidenceText": "ECG: ST depression in V4-V6. Troponin trending up. Assessment: Acute coronary syndrome, NSTEMI to rule out.",
+    "confidence": 0.78,
+    "role": "primary"
+  },
+  "secondaryDiagnoses": [
+    {
+      "condition": "Type 2 diabetes mellitus",
+      "icd10": "E11.9",
+      "snomed": "44054006",
+      "evidenceText": "HbA1c 8.4 % on admission. Continue metformin 500 mg bid.",
+      "confidence": 0.85,
+      "role": "secondary"
+    },
+    {
+      "condition": "Essential hypertension",
+      "icd10": "I10",
+      "snomed": "59621000",
+      "evidenceText": "BP 152/95 mmHg on arrival. Start lisinopril 10 mg daily.",
+      "confidence": 0.82,
+      "role": "secondary"
+    }
+  ],
+  "complications": [],
+  "comorbidities": [
+    {
+      "condition": "Type 2 diabetes mellitus",
+      "icd10": "E11.9",
+      "confidence": 0.85,
+      "role": "comorbidity"
+    }
+  ],
+  "codingCandidates": [
+    { "code": "I21.9", "system": "ICD10",    "display": "Acute myocardial infarction", "forCondition": "Acute myocardial infarction", "confidence": 0.78 },
+    { "code": "22298006", "system": "SNOMEDCT", "display": "Acute myocardial infarction", "forCondition": "Acute myocardial infarction", "confidence": 0.78 },
+    { "code": "E11.9", "system": "ICD10", "display": "Type 2 diabetes mellitus", "forCondition": "Type 2 diabetes mellitus", "confidence": 0.85 },
+    { "code": "44054006", "system": "SNOMEDCT", "display": "Type 2 diabetes mellitus", "forCondition": "Type 2 diabetes mellitus", "confidence": 0.85 },
+    { "code": "I10", "system": "ICD10", "display": "Essential hypertension", "forCondition": "Essential hypertension", "confidence": 0.82 }
+  ],
+  "evidence": [
+    { "condition": "Acute myocardial infarction", "evidence": "ECG: ST depression V4-V6; Troponin pending; Assessment line: NSTEMI to rule out." },
+    { "condition": "Type 2 diabetes mellitus", "evidence": "HbA1c 8.4 %; on metformin 500 mg bid." },
+    { "condition": "Essential hypertension", "evidence": "BP 152/95 mmHg; add lisinopril." }
+  ],
+  "warnings": [],
+  "disclaimer": "AI-assisted suggestion only. All codes require human coder review before billing or clinical use."
+}

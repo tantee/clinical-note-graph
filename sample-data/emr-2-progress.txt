@@ -1,0 +1,23 @@
+Progress note — Day 2
+Patient: Somchai Sample (HN123456)
+Date: 2026-05-16 08:30 GMT+7
+Provider: Dr. Demo
+
+Subjective: Chest pain resolved overnight. Patient reports feeling well, ambulating without distress.
+
+Objective:
+BP 132/82, HR 78, SpO2 98% RA
+HbA1c repeat 8.3 %
+Glucose 145 mg/dL
+Troponin trending down (peak yesterday).
+
+Assessment:
+- Acute coronary syndrome — clinical improvement, no further ischemic events
+- Type 2 diabetes mellitus — glycemic control still suboptimal
+- Hypertension — improved BP on lisinopril
+
+Plan:
+- Continue current medications (aspirin, atorvastatin, metformin, lisinopril)
+- Add education on dietary modification
+- Cardiology follow up in 1 week
+- Plan discharge tomorrow if labs stable

@@ -1,0 +1,49 @@
+{
+  "resourceType": "Bundle",
+  "type": "collection",
+  "entry": [
+    { "resource": {
+        "resourceType": "Patient",
+        "id": "HN789",
+        "name": [{ "given": ["Malee"], "family": "Demo" }],
+        "gender": "female",
+        "birthDate": "1972-08-09"
+    } },
+    { "resource": {
+        "resourceType": "Encounter",
+        "class": { "display": "admission" },
+        "period": { "start": "2026-05-10T08:00:00+07:00" }
+    } },
+    { "resource": {
+        "resourceType": "Condition",
+        "clinicalStatus": { "text": "active" },
+        "code": { "text": "Community acquired pneumonia",
+                  "coding": [{ "system": "http://hl7.org/fhir/sid/icd-10", "code": "J18.9" }] }
+    } },
+    { "resource": {
+        "resourceType": "Condition",
+        "code": { "text": "Asthma",
+                  "coding": [{ "system": "http://hl7.org/fhir/sid/icd-10", "code": "J45.909" }] }
+    } },
+    { "resource": {
+        "resourceType": "MedicationRequest",
+        "status": "active",
+        "medicationCodeableConcept": { "text": "Ceftriaxone 1g IV q24h" }
+    } },
+    { "resource": {
+        "resourceType": "MedicationRequest",
+        "status": "active",
+        "medicationCodeableConcept": { "text": "Salbutamol 100mcg MDI 2 puffs prn" }
+    } },
+    { "resource": {
+        "resourceType": "Observation",
+        "code": { "text": "SpO2" },
+        "valueQuantity": { "value": 92, "unit": "%" }
+    } },
+    { "resource": {
+        "resourceType": "Observation",
+        "code": { "text": "Temperature" },
+        "valueQuantity": { "value": 38.6, "unit": "°C" }
+    } }
+  ]
+}

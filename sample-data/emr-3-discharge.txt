@@ -1,0 +1,25 @@
+Discharge summary
+Patient: Somchai Sample (HN123456)
+Date of admission: 2026-05-15
+Date of discharge: 2026-05-17
+
+Final diagnoses:
+1. NSTEMI (acute non-ST elevation myocardial infarction)
+2. Type 2 diabetes mellitus, suboptimally controlled
+3. Essential hypertension
+
+Hospital course:
+Patient admitted with chest pain. ECG showed ST depression in V4-V6, troponin peaked at 1.8 ng/mL.
+Started on aspirin, atorvastatin, lisinopril. Pain resolved on day 1. No recurrent ischemia.
+HbA1c 8.4% — diabetes education started.
+
+Discharge medications:
+- Aspirin 81 mg daily
+- Atorvastatin 40 mg nightly
+- Metformin 500 mg bid (continue)
+- Lisinopril 10 mg daily
+
+Follow up:
+- Cardiology in 1 week
+- Endocrine clinic in 2 weeks
+- Patient educated on warning symptoms requiring return to ED

@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.venv/
+venv/
+.python-version
+
+# Node / Vite
+node_modules/
+dist/
+.vite/
+*.tsbuildinfo
+.eslintcache
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Local env
+.env
+.env.local
+.env.*.local
+
+# Build / coverage
+coverage/
+test-results/
+playwright-report/
+.playwright/
+
+# Logs
+*.log
+
+# Docker volumes (in case anyone runs binds locally)
+data/

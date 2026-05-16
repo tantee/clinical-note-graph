@@ -1,0 +1,44 @@
+# Production overlay: usage:
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+#
+# Differences from dev:
+# - No bind mounts of source code into containers
+# - No --reload on uvicorn
+# - Multi-stage frontend build served by nginx on port 80
+# - Backend & DBs not exposed externally (only nginx is)
+# - CORS allowlist set to FRONTEND_ORIGIN env (must be set)
+
+services:
+  postgres:
+    ports: !reset []
+    restart: always
+
+  neo4j:
+    ports: !reset []
+    restart: always
+
+  backend:
+    volumes:
+      - vaultdata:/data/vault
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers ${UVICORN_WORKERS:-2} --proxy-headers
+    environment:
+      CORS_ORIGINS: ${FRONTEND_ORIGIN:?FRONTEND_ORIGIN env required for prod (e.g. https://cng.example.com)}
+      API_KEY: ${BACKEND_API_KEY:?BACKEND_API_KEY env required for prod}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    ports: !reset []
+    restart: always
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.prod
+      args:
+        VITE_API_BASE: ${VITE_API_BASE:?VITE_API_BASE env required for prod (e.g. https://api.cng.example.com)}
+    ports:
+      - "${FRONTEND_PORT:-80}:80"
+    volumes: !reset []
+    command: !reset []
+    restart: always
+    depends_on:
+      backend:
+        condition: service_healthy

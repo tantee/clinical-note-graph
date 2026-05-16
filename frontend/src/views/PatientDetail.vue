@@ -1,0 +1,360 @@
+<template>
+  <div v-if="!loading && !patient">
+    <v-alert type="error" variant="tonal">Patient not found.</v-alert>
+  </div>
+
+  <div v-else>
+    <div class="d-flex align-center mb-4 flex-wrap">
+      <v-btn icon="mdi-arrow-left" variant="text" :to="{ name: 'patients' }" aria-label="Back to patients" />
+      <div class="ml-2">
+        <h1 class="text-h5 font-weight-bold mb-0">Patient {{ id }}</h1>
+        <div class="text-body-2 text-grey-darken-1">
+          {{ patient?.patient?.name || '(no name on file)' }}
+          <span v-if="patient?.patient?.gender" class="ml-2">·</span>
+          <span v-if="patient?.patient?.gender" class="ml-2">{{ patient.patient.gender }}</span>
+          <span v-if="patient?.patient?.birth_date" class="ml-2">· DOB {{ patient.patient.birth_date }}</span>
+        </div>
+      </div>
+      <v-spacer />
+      <v-btn class="mr-2" color="primary" variant="tonal" prepend-icon="mdi-text-box-outline" :loading="busy.summary" @click="loadSummary">Summary</v-btn>
+      <v-btn color="primary" variant="tonal" prepend-icon="mdi-medical-bag-outline" :loading="busy.coding" @click="loadCoding">Coding</v-btn>
+    </div>
+
+    <v-tabs v-model="tab" color="primary" density="comfortable" show-arrows>
+      <v-tab value="overview" prepend-icon="mdi-view-dashboard-outline">Overview</v-tab>
+      <v-tab value="timeline" prepend-icon="mdi-timeline-text-outline">Timeline</v-tab>
+      <v-tab value="notes" prepend-icon="mdi-file-document-multiple-outline">Notes</v-tab>
+      <v-tab value="graph" prepend-icon="mdi-graph-outline">Graph</v-tab>
+      <v-tab value="raw" prepend-icon="mdi-text-box-search-outline">EMR vs facts</v-tab>
+      <v-tab value="ai" prepend-icon="mdi-robot-outline">AI output</v-tab>
+    </v-tabs>
+
+    <v-window v-model="tab" class="mt-4" :touch="false">
+      <!-- Overview -->
+      <v-window-item value="overview" eager>
+        <v-row>
+          <v-col cols="12" md="6">
+            <FactCard
+              title="Active problems" icon="mdi-medical-bag" color="deep-orange"
+              :items="patient?.problems || []" empty="No problems extracted yet"
+              :title-fn="(p) => p.value" :code-fn="(p) => p.normalized_code && `${p.coding_system}: ${p.normalized_code}`"
+              :status-fn="(p) => p.review_status"
+            />
+          </v-col>
+          <v-col cols="12" md="6">
+            <FactCard
+              title="Medications" icon="mdi-pill" color="green"
+              :items="patient?.medications || []" empty="No medications yet"
+              :title-fn="(m) => m.value" :code-fn="(m) => m.extra?.action"
+              :status-fn="(m) => m.review_status"
+            />
+          </v-col>
+          <v-col cols="12" md="6">
+            <FactCard
+              title="Recent observations" icon="mdi-chart-line" color="cyan"
+              :items="(patient?.observations || []).slice(0, 30)" empty="No observations yet"
+              :title-fn="(o) => o.value"
+            />
+          </v-col>
+          <v-col cols="12" md="6">
+            <FactCard
+              title="Plans" icon="mdi-clipboard-list-outline" color="brown"
+              :items="patient?.plans || []" empty="No plans yet"
+              :title-fn="(p) => p.value"
+            />
+          </v-col>
+        </v-row>
+
+        <v-card v-if="summary" class="mt-4">
+          <SectionHeader title="AI summary" icon="mdi-text-box-outline">
+            <span class="text-caption text-grey-darken-1 ml-2">({{ summary.type }})</span>
+            <template #actions><v-chip size="x-small" color="warning" variant="tonal">AI-assisted</v-chip></template>
+          </SectionHeader>
+          <v-divider />
+          <v-card-text>
+            <div class="cng-markdown" v-html="renderedSummary" />
+          </v-card-text>
+        </v-card>
+
+        <v-card v-if="codingResp" class="mt-4">
+          <SectionHeader title="Coding suggestion" icon="mdi-medical-bag-outline">
+            <template #actions><v-chip size="x-small" color="warning" variant="tonal">AI-assisted</v-chip></template>
+          </SectionHeader>
+          <v-divider />
+          <v-card-text>
+            <div v-if="codingResp.primaryDiagnosis" class="mb-2">
+              <span class="text-body-2 text-grey-darken-1">Primary</span><br />
+              <strong>{{ codingResp.primaryDiagnosis.condition }}</strong>
+              <v-chip v-if="codingResp.primaryDiagnosis.icd10" size="x-small" class="ml-2">ICD-10 {{ codingResp.primaryDiagnosis.icd10 }}</v-chip>
+              <v-chip v-if="codingResp.primaryDiagnosis.snomed" size="x-small" class="ml-1">SNOMED {{ codingResp.primaryDiagnosis.snomed }}</v-chip>
+            </div>
+            <div v-if="codingResp.secondaryDiagnoses?.length">
+              <div class="text-body-2 text-grey-darken-1 mb-1 mt-3">Secondary</div>
+              <div v-for="(d, i) in codingResp.secondaryDiagnoses" :key="i" class="mb-1">
+                {{ d.condition }}
+                <v-chip v-if="d.icd10" size="x-small" class="ml-1">ICD-10 {{ d.icd10 }}</v-chip>
+                <v-chip v-if="d.snomed" size="x-small" class="ml-1">SNOMED {{ d.snomed }}</v-chip>
+              </div>
+            </div>
+            <v-alert v-if="codingResp.disclaimer" type="warning" variant="tonal" density="compact" class="mt-3">
+              {{ codingResp.disclaimer }}
+            </v-alert>
+          </v-card-text>
+        </v-card>
+      </v-window-item>
+
+      <!-- Timeline -->
+      <v-window-item value="timeline">
+        <Timeline :encounters="timeline.encounters || []" @select="selectEncounter" />
+      </v-window-item>
+
+      <!-- Notes -->
+      <v-window-item value="notes">
+        <v-row>
+          <v-col cols="12" md="3">
+            <v-card>
+              <SectionHeader title="Files" icon="mdi-folder-multiple-outline" />
+              <v-divider />
+              <v-list density="compact" nav>
+                <v-list-item
+                  v-for="f in notes"
+                  :key="f.path"
+                  :title="f.name"
+                  :subtitle="f.kind"
+                  :active="selectedNote?.path === f.path"
+                  :prepend-icon="kindIcon(f.kind)"
+                  @click="openNote(f.path)"
+                />
+                <EmptyState v-if="!notes.length" icon="mdi-folder-open-outline" title="No notes yet" />
+              </v-list>
+            </v-card>
+          </v-col>
+          <v-col cols="12" md="9">
+            <MarkdownViewer
+              v-if="selectedNote"
+              :path="selectedNote.path"
+              :content="selectedNote.content"
+              :backlinks="selectedNote.backlinks"
+              @open="openNote"
+            />
+            <v-alert v-else type="info" variant="tonal">Select a note from the file tree.</v-alert>
+          </v-col>
+        </v-row>
+      </v-window-item>
+
+      <!-- Graph -->
+      <v-window-item value="graph">
+        <GraphView :data="graph" :height="640" />
+      </v-window-item>
+
+      <!-- Raw EMR vs facts -->
+      <v-window-item value="raw">
+        <v-row>
+          <v-col cols="12" md="3">
+            <v-card>
+              <SectionHeader title="Documents" icon="mdi-file-multiple-outline" />
+              <v-divider />
+              <v-list density="compact" nav>
+                <v-list-item
+                  v-for="d in encounterDocuments"
+                  :key="d.document_id"
+                  :title="d.document_id"
+                  :subtitle="`v${d.version} · ${d.format}`"
+                  :active="selectedDocument?.document?.document_id === d.document_id"
+                  @click="openDocument(d.document_id)"
+                />
+                <EmptyState v-if="!encounterDocuments.length" icon="mdi-file-question-outline" title="Pick an encounter on the Timeline tab" />
+              </v-list>
+            </v-card>
+          </v-col>
+          <v-col cols="12" md="4">
+            <v-card>
+              <SectionHeader title="Raw EMR" icon="mdi-text-box-outline" />
+              <v-divider />
+              <v-card-text>
+                <pre v-if="selectedDocument?.document?.raw_content" class="cng-raw">{{ selectedDocument.document.raw_content }}</pre>
+                <EmptyState v-else icon="mdi-text-box-outline" title="No document selected" />
+              </v-card-text>
+            </v-card>
+          </v-col>
+          <v-col cols="12" md="5">
+            <v-card>
+              <SectionHeader title="Extracted facts" icon="mdi-format-list-bulleted-square" />
+              <v-divider />
+              <v-list density="comfortable">
+                <v-list-item v-for="f in selectedDocument?.facts || []" :key="f.id" :title="f.value">
+                  <template #prepend>
+                    <v-icon :color="FACT_TYPE_META[f.type]?.color || 'grey'">{{ FACT_TYPE_META[f.type]?.icon || 'mdi-circle-medium' }}</v-icon>
+                  </template>
+                  <v-list-item-subtitle>
+                    <v-chip size="x-small" class="mr-2" variant="tonal">{{ f.type }}</v-chip>
+                    <span v-if="f.normalized_code">{{ f.coding_system }}: {{ f.normalized_code }}</span>
+                    <span v-if="f.confidence != null"> · conf {{ f.confidence.toFixed(2) }}</span>
+                  </v-list-item-subtitle>
+                  <template #append>
+                    <v-btn-toggle
+                      :model-value="f.review_status"
+                      mandatory
+                      variant="outlined"
+                      density="compact"
+                      @update:model-value="(v) => onReviewChange(f, v)"
+                    >
+                      <v-btn value="ai_suggested" size="x-small" icon="mdi-robot" aria-label="AI suggested" />
+                      <v-btn value="human_confirmed" size="x-small" icon="mdi-check" color="success" aria-label="Confirm" />
+                      <v-btn value="rejected" size="x-small" icon="mdi-close" color="error" aria-label="Reject" />
+                    </v-btn-toggle>
+                  </template>
+                </v-list-item>
+                <EmptyState v-if="!selectedDocument?.facts?.length" icon="mdi-format-list-bulleted-square" title="No facts" />
+              </v-list>
+            </v-card>
+          </v-col>
+        </v-row>
+      </v-window-item>
+
+      <!-- AI raw -->
+      <v-window-item value="ai">
+        <v-card>
+          <SectionHeader title="Latest AI output for selected document" icon="mdi-robot-outline" />
+          <v-divider />
+          <v-card-text>
+            <pre v-if="selectedDocument?.aiOutput" class="cng-raw">{{ JSON.stringify(selectedDocument.aiOutput.raw_output, null, 2) }}</pre>
+            <EmptyState v-else icon="mdi-robot-confused-outline" title="No AI output"
+                        hint="Select an encounter on the Timeline tab, then a document on the EMR-vs-facts tab." />
+          </v-card-text>
+        </v-card>
+      </v-window-item>
+    </v-window>
+  </div>
+</template>
+
+<script setup>
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { marked } from 'marked'
+import { FACT_TYPE_META } from '../constants/clinical.js'
+import {
+  getPatient, getTimeline, getGraph, getNotes, getNote,
+  getEncounterDocuments, getDocument, summarize, suggestCoding, reviewFact,
+} from '../api/client.js'
+import { useUiStore } from '../stores/ui.js'
+import MarkdownViewer from '../components/MarkdownViewer.vue'
+import GraphView from '../components/GraphView.vue'
+import Timeline from '../components/Timeline.vue'
+import SectionHeader from '../components/SectionHeader.vue'
+import EmptyState from '../components/EmptyState.vue'
+import FactCard from '../components/FactCard.vue'
+
+const props = defineProps({ id: { type: String, required: true } })
+const ui = useUiStore()
+
+const tab = ref('overview')
+const loading = ref(true)
+const patient = ref(null)
+const timeline = ref({ encounters: [] })
+const graph = ref({ nodes: [], edges: [] })
+const notes = ref([])
+const selectedNote = ref(null)
+const encounterDocuments = ref([])
+const selectedDocument = ref(null)
+const summary = ref(null)
+const codingResp = ref(null)
+const busy = reactive({ summary: false, coding: false })
+let activeAbort = null
+
+async function load() {
+  if (activeAbort) activeAbort.abort()
+  const ctl = new AbortController()
+  activeAbort = ctl
+  loading.value = true
+  try {
+    const [p, t, g, n] = await Promise.all([
+      getPatient(props.id, ctl.signal),
+      getTimeline(props.id, ctl.signal),
+      getGraph(props.id, ctl.signal),
+      getNotes(props.id, ctl.signal),
+    ])
+    patient.value = p
+    timeline.value = t
+    graph.value = g
+    notes.value = n.files
+    if (notes.value.length) {
+      const idx = notes.value.find((f) => f.path.endsWith('index.md')) || notes.value[0]
+      openNote(idx.path)
+    } else {
+      selectedNote.value = null
+    }
+  } catch (e) {
+    if (e.name !== 'CanceledError' && e.name !== 'AbortError') {
+      patient.value = null
+    }
+  } finally {
+    loading.value = false
+  }
+}
+
+async function openNote(path) {
+  try {
+    selectedNote.value = await getNote(props.id, path)
+  } catch {
+    selectedNote.value = null
+  }
+}
+
+async function selectEncounter(e) {
+  try {
+    const resp = await getEncounterDocuments(props.id, e.encounter_id)
+    encounterDocuments.value = resp.documents
+    if (resp.documents.length) {
+      await openDocument(resp.documents[0].document_id)
+    } else {
+      selectedDocument.value = null
+    }
+    tab.value = 'raw'
+  } catch (err) {
+    /* error already toast-ed by interceptor */
+  }
+}
+
+async function openDocument(documentId) {
+  selectedDocument.value = await getDocument(props.id, documentId)
+}
+
+async function loadSummary() {
+  busy.summary = true
+  try { summary.value = await summarize(props.id, { type: 'detailed', includeEvidence: true }) }
+  finally { busy.summary = false }
+}
+async function loadCoding() {
+  busy.coding = true
+  try { codingResp.value = await suggestCoding(props.id, { standards: ['ICD10', 'SNOMEDCT'], includeEvidence: true }) }
+  finally { busy.coding = false }
+}
+
+async function onReviewChange(fact, status) {
+  if (!status || status === fact.review_status) return
+  const prev = fact.review_status
+  fact.review_status = status
+  try {
+    await reviewFact(fact.id, status)
+    ui.success(`Marked as ${status.replaceAll('_', ' ')}`)
+  } catch {
+    fact.review_status = prev
+  }
+}
+
+const renderedSummary = computed(() => marked.parse(summary.value?.markdown || ''))
+
+function kindIcon(kind) {
+  return {
+    visits: 'mdi-calendar-text',
+    problems: 'mdi-medical-bag',
+    medications: 'mdi-pill',
+    labs: 'mdi-chart-line',
+    sources: 'mdi-text-box',
+  }[kind] || 'mdi-file-document-outline'
+}
+
+watch(() => props.id, load)
+onMounted(load)
+onBeforeUnmount(() => activeAbort && activeAbort.abort())
+</script>

@@ -1,0 +1,67 @@
+:root {
+  --md-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
+}
+
+html,
+body {
+  background: var(--v-theme-background, #f5f7fb);
+}
+
+.cng-app .v-application__wrap {
+  min-height: 100vh;
+}
+
+.cng-mono,
+pre.cng-mono,
+code.cng-mono {
+  font-family: var(--md-mono);
+  font-size: 12px;
+}
+
+pre.cng-raw {
+  font-family: var(--md-mono);
+  font-size: 12px;
+  white-space: pre-wrap;
+  background: rgba(127, 127, 127, 0.06);
+  padding: 12px;
+  border-radius: 8px;
+  max-height: 500px;
+  overflow: auto;
+}
+
+.cng-markdown :deep(h1),
+.cng-markdown :deep(h2),
+.cng-markdown :deep(h3) { margin-top: 1em; margin-bottom: 0.35em; }
+.cng-markdown :deep(h1) { font-size: 1.4rem; }
+.cng-markdown :deep(h2) { font-size: 1.15rem; }
+.cng-markdown :deep(h3) { font-size: 1.05rem; }
+.cng-markdown :deep(ul) { margin-left: 1.3em; }
+.cng-markdown :deep(p) { line-height: 1.55; }
+.cng-markdown :deep(code) { background: rgba(127,127,127,0.12); padding: 1px 6px; border-radius: 6px; font-family: var(--md-mono); font-size: 0.95em; }
+.cng-markdown :deep(pre) { background: rgba(127,127,127,0.08); padding: 12px; border-radius: 8px; overflow: auto; }
+.cng-markdown :deep(pre code) { background: transparent; padding: 0; }
+.cng-markdown :deep(a) { color: rgb(var(--v-theme-primary)); text-decoration: none; }
+.cng-markdown :deep(a:hover) { text-decoration: underline; }
+.cng-markdown :deep(blockquote) { border-left: 3px solid rgb(var(--v-theme-warning)); padding-left: 12px; color: inherit; opacity: 0.85; }
+.cng-markdown :deep(table) { border-collapse: collapse; margin: 0.5em 0; }
+.cng-markdown :deep(th), .cng-markdown :deep(td) { border: 1px solid rgba(127,127,127,0.3); padding: 6px 10px; }
+
+.cng-empty {
+  text-align: center;
+  padding: 40px 16px;
+  color: rgba(127,127,127,0.9);
+}
+
+.cng-card-section-title {
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.cng-scroll-shadow {
+  background:
+    linear-gradient(rgba(255,255,255,0), rgba(255,255,255,0)) 0 0,
+    linear-gradient(rgba(0,0,0,.10), rgba(0,0,0,0)) 0 0 / 100% 6px;
+}

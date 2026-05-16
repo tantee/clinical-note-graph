@@ -1,0 +1,43 @@
+Admission note — Ramathibodi Hospital, Internal Medicine
+Patient: Somchai Sample, 60M (HN123456)
+Date: 2026-05-15 10:00 GMT+7
+Provider: Dr. Demo
+
+Chief complaint: Retrosternal chest pain x 2 hours
+
+History of present illness:
+60-year-old man with known Type 2 diabetes mellitus and essential hypertension presents
+to the ED with substernal chest pain radiating to the left arm. Pain started while gardening,
+not relieved by rest. No prior similar episodes.
+
+Past medical history:
+- Type 2 diabetes mellitus on metformin
+- Essential hypertension, suboptimally controlled
+
+Vitals on arrival:
+BP 152/95 mmHg, HR 96, RR 18, Temp 36.8 C, SpO2 96% RA
+
+Labs:
+HbA1c 8.4 %
+Glucose 220 mg/dL
+Hemoglobin 13.2 g/dL
+Creatinine 1.1 mg/dL
+
+ECG: ST depression in V4-V6
+Troponin: pending
+
+Assessment:
+1. Acute coronary syndrome, NSTEMI to rule out
+2. Type 2 diabetes mellitus, poorly controlled
+3. Essential hypertension
+
+Plan:
+- Admit Coronary Care Unit
+- Aspirin 81 mg daily (start)
+- Atorvastatin 40 mg nightly (start)
+- Continue metformin 500 mg bid
+- Add lisinopril 10 mg daily
+- Cardiology consult
+- Repeat troponin q6h
+- Education on diabetes self-management
+- Discharge planning pending response
