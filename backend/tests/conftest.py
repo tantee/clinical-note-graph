@@ -301,6 +301,94 @@ class FakeStore:
             if eid is not None:
                 rows = [d for d in rows if d["encounter_id"] == eid]
             return FakeResult(rows)
+        # Aggregations on ai_outputs — summary + per-model + per-day.
+        # These must fire BEFORE the generic `from ai_outputs` branch below.
+        if "from ai_outputs" in s and "count(*)" in s and "filter (where error" in s:
+            rows_src = list(self.ai_outputs)
+            if params.get("start"):
+                rows_src = [r for r in rows_src if str(r.get("created_at") or "") >= params["start"][:10]]
+            if params.get("end"):
+                rows_src = [r for r in rows_src if str(r.get("created_at") or "") <= params["end"][:10]]
+            total_lat = sum((r.get("latency_ms") or 0) for r in rows_src)
+            return FakeResult([{
+                "total_calls": len(rows_src),
+                "total_tokens": sum((r.get("total_tokens") or 0) for r in rows_src),
+                "total_cost_usd": sum((r.get("cost_usd") or 0) for r in rows_src),
+                "avg_latency_ms": (total_lat / len(rows_src)) if rows_src else 0,
+                "failures": sum(1 for r in rows_src if r.get("error")),
+            }])
+        if "from ai_outputs" in s and "group by model" in s:
+            rows_src = list(self.ai_outputs)
+            if params.get("start"):
+                rows_src = [r for r in rows_src if str(r.get("created_at") or "") >= params["start"][:10]]
+            if params.get("end"):
+                rows_src = [r for r in rows_src if str(r.get("created_at") or "") <= params["end"][:10]]
+            buckets: dict[str, dict] = defaultdict(lambda: {
+                "calls": 0, "prompt_tokens": 0, "completion_tokens": 0,
+                "cost_usd": 0, "avg_latency_ms": 0, "_n": 0,
+            })
+            for r in rows_src:
+                b = buckets[r["model"]]
+                b["calls"] += 1
+                b["prompt_tokens"] += r.get("prompt_tokens") or 0
+                b["completion_tokens"] += r.get("completion_tokens") or 0
+                b["cost_usd"] += r.get("cost_usd") or 0
+                b["avg_latency_ms"] += r.get("latency_ms") or 0
+                b["_n"] += 1
+            out = []
+            for model, b in buckets.items():
+                out.append({
+                    "model": model, "calls": b["calls"],
+                    "prompt_tokens": b["prompt_tokens"],
+                    "completion_tokens": b["completion_tokens"],
+                    "cost_usd": b["cost_usd"],
+                    "avg_latency_ms": (b["avg_latency_ms"] / b["_n"]) if b["_n"] else 0,
+                })
+            out.sort(key=lambda r: -r["cost_usd"])
+            return FakeResult(out)
+        if "from ai_outputs" in s and "group by 1, 2" in s:
+            rows_src = list(self.ai_outputs)
+            if params.get("start"):
+                rows_src = [r for r in rows_src if str(r.get("created_at") or "") >= params["start"][:10]]
+            if params.get("end"):
+                rows_src = [r for r in rows_src if str(r.get("created_at") or "") <= params["end"][:10]]
+            bucket: dict[tuple, dict] = defaultdict(lambda: {"cost_usd": 0, "calls": 0})
+            for r in rows_src:
+                day = str(r.get("created_at") or "")[:10] or "0000-00-00"
+                key = (day, r.get("call_type"))
+                bucket[key]["cost_usd"] += r.get("cost_usd") or 0
+                bucket[key]["calls"] += 1
+            out = [{"day": k[0], "call_type": k[1], **v} for k, v in bucket.items()]
+            out.sort(key=lambda r: r["day"])
+            return FakeResult(out)
+        # list_calls — paginated select with filters (model, status, q, range).
+        if "from ai_outputs" in s and ("order by created_at desc" in s) and ("lim" in params or "off" in params):
+            rows_src = list(self.ai_outputs)
+            if params.get("start"):
+                rows_src = [r for r in rows_src if str(r.get("created_at") or "") >= params["start"][:10]]
+            if params.get("end"):
+                rows_src = [r for r in rows_src if str(r.get("created_at") or "") <= params["end"][:10]]
+            if params.get("model"):
+                rows_src = [r for r in rows_src if r.get("model") == params["model"]]
+            if "error is not null" in s:
+                rows_src = [r for r in rows_src if r.get("error") is not None]
+            elif "error is null" in s:
+                rows_src = [r for r in rows_src if r.get("error") is None]
+            if params.get("q"):
+                needle = params["q"].strip("%").lower()
+                rows_src = [
+                    r for r in rows_src
+                    if needle in (r.get("error") or "").lower()
+                    or needle in (r.get("model") or "").lower()
+                ]
+            rows_src.sort(key=lambda r: str(r.get("created_at") or ""), reverse=True)
+            offset = int(params.get("off") or 0)
+            limit = int(params.get("lim") or 50)
+            return FakeResult(rows_src[offset : offset + limit])
+        # get_call — single row by id.
+        if "from ai_outputs" in s and ":id" in s and params.get("id") is not None:
+            row = next((r for r in self.ai_outputs if r.get("id") == params["id"]), None)
+            return FakeResult([row] if row else [])
         if " from ai_outputs " in s:
             did = params.get("did")
             rows = [a for a in self.ai_outputs if a["document_id"] == did]
@@ -367,6 +455,8 @@ def fake_store(monkeypatch):
     monkeypatch.setattr(ai_provider_mod, "db_session", _db_session)
     import app.services.queue as queue_mod
     monkeypatch.setattr(queue_mod, "db_session", _db_session)
+    import app.services.debug_queries as debug_queries_mod
+    monkeypatch.setattr(debug_queries_mod, "db_session", _db_session)
     import app.routers.config as cfg_router
     monkeypatch.setattr(cfg_router, "db_session", _db_session)
     import app.routers.patient as p_router
