@@ -35,7 +35,7 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
         return response
 
 
-_PROTECTED_PREFIXES = ("/api/emr", "/api/config", "/api/export", "/api/facts")
+_PROTECTED_PREFIXES = ("/api/emr", "/api/config", "/api/export", "/api/facts", "/api/debug")
 
 
 class ApiKeyMiddleware(BaseHTTPMiddleware):

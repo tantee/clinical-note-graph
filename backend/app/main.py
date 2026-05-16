@@ -14,6 +14,7 @@ from app.config import get_settings
 from app.db.neo4j_client import close_driver
 from app.middleware import ApiKeyMiddleware, RequestContextMiddleware
 from app.routers import config as config_router
+from app.routers import debug as debug_router
 from app.routers import emr, export, jobs, patient
 from app.services.graph_updater import ensure_constraints
 from app.services.queue import start_workers, stop_workers
@@ -103,6 +104,7 @@ def create_app() -> FastAPI:
     app.include_router(config_router.router)
     app.include_router(export.router)
     app.include_router(jobs.router)
+    app.include_router(debug_router.router)
     return app
 
 
