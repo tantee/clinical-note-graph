@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import httpx
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy import text
@@ -11,6 +12,7 @@ from app.db.helpers import audit, j
 from app.db.postgres import db_session
 from app.schemas.coding import ExportProfilePayload
 from app.services import runtime_config
+from app.services.pricing import delete_rate, list_rates, upsert_rate
 
 router = APIRouter(prefix="/api/config", tags=["config"])
 
@@ -114,3 +116,84 @@ def delete_export_profile(profile_id: str) -> dict[str, Any]:
         s.execute(text("DELETE FROM export_profiles WHERE profile_id = :p"), {"p": profile_id})
         audit(s, action="EXPORT_PROFILE_DELETE", target_type="export_profile", target_id=profile_id, payload=None)
     return {"deleted": profile_id}
+
+
+class PricingPatch(BaseModel):
+    prompt_per_1m: float | None = None
+    completion_per_1m: float | None = None
+    embedding_per_1m: float | None = None
+    source: str | None = "manual"
+
+
+def _serialise_rate(row: dict) -> dict:
+    def _f(v):
+        return float(v) if v is not None else None
+    return {
+        "model": row["model"],
+        "prompt_per_1m": _f(row.get("prompt_per_1m")),
+        "completion_per_1m": _f(row.get("completion_per_1m")),
+        "embedding_per_1m": _f(row.get("embedding_per_1m")),
+        "source": row.get("source"),
+        "updated_at": str(row["updated_at"]) if row.get("updated_at") else None,
+    }
+
+
+@router.get("/pricing")
+def get_pricing() -> list[dict]:
+    return [_serialise_rate(r) for r in list_rates()]
+
+
+@router.put("/pricing/{model:path}")
+def put_pricing(model: str, body: PricingPatch) -> dict:
+    upsert_rate(
+        model=model,
+        prompt_per_1m=body.prompt_per_1m,
+        completion_per_1m=body.completion_per_1m,
+        embedding_per_1m=body.embedding_per_1m,
+        source=body.source or "manual",
+    )
+    return {"model": model}
+
+
+@router.delete("/pricing/{model:path}")
+def del_pricing(model: str) -> dict:
+    delete_rate(model)
+    return {"deleted": model}
+
+
+@router.post("/pricing/refresh-openrouter")
+async def refresh_openrouter() -> dict:
+    async with httpx.AsyncClient(timeout=15) as c:
+        r = await c.get("https://openrouter.ai/api/v1/models")
+        r.raise_for_status()
+        data = r.json()
+    upserted = 0
+    for entry in data.get("data", []) or []:
+        model = entry.get("id")
+        if not model:
+            continue
+        pricing = entry.get("pricing") or {}
+        is_embedding = "embedding" in model.lower()
+        try:
+            prompt = float(pricing.get("prompt")) if pricing.get("prompt") is not None else None
+            completion = float(pricing.get("completion")) if pricing.get("completion") is not None else None
+        except (TypeError, ValueError):
+            continue
+        if is_embedding:
+            upsert_rate(
+                model=model,
+                prompt_per_1m=None,
+                completion_per_1m=None,
+                embedding_per_1m=(prompt * 1e6) if prompt is not None else None,
+                source="openrouter",
+            )
+        else:
+            upsert_rate(
+                model=model,
+                prompt_per_1m=(prompt * 1e6) if prompt is not None else None,
+                completion_per_1m=(completion * 1e6) if completion is not None else None,
+                embedding_per_1m=None,
+                source="openrouter",
+            )
+        upserted += 1
+    return {"upserted": upserted, "source": "openrouter"}
