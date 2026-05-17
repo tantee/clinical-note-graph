@@ -82,9 +82,10 @@ services:
     depends_on:
       - backend
     environment:
-      # Point axios at the Caddy front-door so direct :5173 access and
-      # proxied :80 access both reach the backend the same way.
-      VITE_API_BASE: ${VITE_API_BASE:-http://localhost}
+      # Empty by default — axios uses relative /api/... URLs so the API is
+      # resolved against whichever origin served the page (the Caddy proxy).
+      # Note the `-` (not `:-`) so an explicit empty string in .env stays empty.
+      VITE_API_BASE: ${VITE_API_BASE-}
     ports:
       - "${FRONTEND_PORT:-5173}:5173"
     volumes:
