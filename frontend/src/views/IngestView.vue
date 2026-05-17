@@ -12,7 +12,7 @@
           <SectionHeader title="Patient" icon="mdi-account-outline" />
           <v-divider />
           <v-card-text>
-            <v-autocomplete
+            <v-combobox
               v-model="patientId"
               :items="patientResults"
               :loading="patientsLoading"
@@ -22,6 +22,7 @@
               :return-object="false"
               :no-filter="true"
               clearable
+              hide-no-data
               @update:search="onSearchPatients"
             />
             <div class="text-caption mt-1">

@@ -43,7 +43,15 @@
               :hint="apiKeyHint"
               persistent-hint
             />
-            <v-text-field v-model="patch.AI_MODEL" label="Model" />
+            <v-text-field v-model="patch.AI_MODEL" label="Default chat model"
+                          hint="Used for any chat task without a per-task override below" persistent-hint />
+            <v-text-field v-model="patch.AI_MODEL_EXTRACT" label="Model — EMR extract"
+                          placeholder="(blank = use default)" persistent-placeholder class="mt-2" />
+            <v-text-field v-model="patch.AI_MODEL_SUMMARY" label="Model — Summary"
+                          placeholder="(blank = use default)" persistent-placeholder />
+            <v-text-field v-model="patch.AI_MODEL_CODING" label="Model — Coding suggest"
+                          placeholder="(blank = use default)" persistent-placeholder />
+            <v-divider class="my-3" />
             <v-text-field v-model="patch.AI_EMBEDDING_MODEL" label="Embedding model" />
           </v-card-text>
         </v-card>
@@ -186,6 +194,9 @@ async function load() {
     AI_BASE_URL: cfg.settings.AI_BASE_URL,
     AI_API_KEY: '',
     AI_MODEL: cfg.settings.AI_MODEL,
+    AI_MODEL_EXTRACT: cfg.settings.AI_MODEL_EXTRACT || '',
+    AI_MODEL_SUMMARY: cfg.settings.AI_MODEL_SUMMARY || '',
+    AI_MODEL_CODING: cfg.settings.AI_MODEL_CODING || '',
     AI_EMBEDDING_MODEL: cfg.settings.AI_EMBEDDING_MODEL,
     VAULT_PATH: cfg.settings.VAULT_PATH,
     CODING_ICD10: cfg.settings.CODING_ICD10,

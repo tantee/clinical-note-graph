@@ -18,7 +18,9 @@ router = APIRouter(prefix="/api/config", tags=["config"])
 
 
 _PATCHABLE = {
-    "AI_PROVIDER", "AI_BASE_URL", "AI_API_KEY", "AI_MODEL", "AI_EMBEDDING_MODEL",
+    "AI_PROVIDER", "AI_BASE_URL", "AI_API_KEY",
+    "AI_MODEL", "AI_MODEL_EXTRACT", "AI_MODEL_SUMMARY", "AI_MODEL_CODING",
+    "AI_EMBEDDING_MODEL",
     "VAULT_PATH",
     "CODING_ICD10", "CODING_SNOMEDCT", "CODING_LOINC", "CODING_RXNORM",
 }
@@ -29,6 +31,9 @@ class ConfigPatch(BaseModel):
     AI_BASE_URL: str | None = None
     AI_API_KEY: str | None = Field(default=None, description="Set to null to clear; omit to leave unchanged")
     AI_MODEL: str | None = None
+    AI_MODEL_EXTRACT: str | None = Field(default=None, description="Override for EMR extract; blank → AI_MODEL")
+    AI_MODEL_SUMMARY: str | None = Field(default=None, description="Override for summary; blank → AI_MODEL")
+    AI_MODEL_CODING: str | None = Field(default=None, description="Override for coding suggest; blank → AI_MODEL")
     AI_EMBEDDING_MODEL: str | None = None
     VAULT_PATH: str | None = None
     CODING_ICD10: bool | None = None

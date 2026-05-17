@@ -1,13 +1,19 @@
 <template>
   <v-app class="cng-app" :theme="ui.theme">
     <v-app-bar density="comfortable" :elevation="1" color="surface">
-      <v-app-bar-title class="font-weight-bold d-flex align-center">
+      <div class="d-flex align-center font-weight-bold pl-4">
         <v-icon class="mr-2" color="primary">mdi-graph-outline</v-icon>
-        <span class="text-body-1">Clinical Note Graph</span>
-        <v-chip size="x-small" class="ml-3" color="warning" variant="tonal" prepend-icon="mdi-alert-decagram-outline">
+        <span class="text-body-1 mr-3">Clinical Note Graph</span>
+        <v-chip
+          size="x-small"
+          color="warning"
+          variant="tonal"
+          prepend-icon="mdi-alert-decagram-outline"
+          class="d-none d-md-inline-flex"
+        >
           AI-assisted · review required
         </v-chip>
-      </v-app-bar-title>
+      </div>
       <v-spacer />
       <v-btn variant="text" to="/patients" prepend-icon="mdi-account-multiple-outline">Patients</v-btn>
       <v-btn variant="text" to="/ingest" prepend-icon="mdi-cloud-upload-outline">Ingest</v-btn>

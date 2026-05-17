@@ -576,15 +576,26 @@ class OpenAICompatibleProvider(AIProvider):
         self.settings = settings
         base = (settings.AI_BASE_URL or "https://api.openai.com/v1").strip().rstrip("/")
         self.base_url = base
-        self.model = settings.AI_MODEL
+        self.model = settings.AI_MODEL                      # default fallback
         self.embedding_model = settings.AI_EMBEDDING_MODEL
         self.headers = {"Content-Type": "application/json"}
         if settings.AI_API_KEY:
             self.headers["Authorization"] = f"Bearer {settings.AI_API_KEY}"
 
-    async def _chat(self, system: str, user: str, *, json_mode: bool = True) -> tuple[str, dict[str, Any]]:
+    def _model_for(self, call_type: str) -> str:
+        """Resolve the model for one call_type; falls back to AI_MODEL when override is blank."""
+        override = {
+            "extract": self.settings.AI_MODEL_EXTRACT,
+            "summary": self.settings.AI_MODEL_SUMMARY,
+            "coding": self.settings.AI_MODEL_CODING,
+        }.get(call_type, "")
+        return (override or self.settings.AI_MODEL).strip() or self.settings.AI_MODEL
+
+    async def _chat(
+        self, system: str, user: str, *, model: str, json_mode: bool = True
+    ) -> tuple[str, dict[str, Any]]:
         payload: dict[str, Any] = {
-            "model": self.model,
+            "model": model,
             "messages": [
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
@@ -620,8 +631,9 @@ class OpenAICompatibleProvider(AIProvider):
             document_id=document_id,
             content=content,
         )
+        model = self._model_for("extract")
         t0 = time.perf_counter()
-        raw_text, raw_resp = await self._chat(system, user, json_mode=True)
+        raw_text, raw_resp = await self._chat(system, user, model=model, json_mode=True)
         latency_ms = int((time.perf_counter() - t0) * 1000)
         usage = raw_resp.get("usage") or {}
         prompt_tok = usage.get("prompt_tokens")
@@ -632,13 +644,13 @@ class OpenAICompatibleProvider(AIProvider):
         parsed.setdefault("documentId", document_id)
         rec = AICallRecord(
             call_type="extract",
-            model=self.model,
+            model=model,
             prompt_tokens=prompt_tok,
             completion_tokens=completion_tok,
             total_tokens=total_tok,
             latency_ms=latency_ms,
             cost_usd=compute_cost(
-                load_rates(self.model),
+                load_rates(model),
                 prompt_tokens=prompt_tok or 0,
                 completion_tokens=completion_tok or 0,
             ),
@@ -667,8 +679,9 @@ class OpenAICompatibleProvider(AIProvider):
             "Return JSON with keys: primaryDiagnosis, secondaryDiagnoses, complications, comorbidities, "
             "codingCandidates, evidence, warnings."
         )
+        model = self._model_for("coding")
         t0 = time.perf_counter()
-        raw_text, raw_resp = await self._chat(system, user, json_mode=True)
+        raw_text, raw_resp = await self._chat(system, user, model=model, json_mode=True)
         latency_ms = int((time.perf_counter() - t0) * 1000)
         usage = raw_resp.get("usage") or {}
         prompt_tok = usage.get("prompt_tokens")
@@ -677,13 +690,13 @@ class OpenAICompatibleProvider(AIProvider):
         parsed = json.loads(raw_text)
         rec = AICallRecord(
             call_type="coding",
-            model=self.model,
+            model=model,
             prompt_tokens=prompt_tok,
             completion_tokens=completion_tok,
             total_tokens=total_tok,
             latency_ms=latency_ms,
             cost_usd=compute_cost(
-                load_rates(self.model),
+                load_rates(model),
                 prompt_tokens=prompt_tok or 0,
                 completion_tokens=completion_tok or 0,
             ),
@@ -706,8 +719,9 @@ class OpenAICompatibleProvider(AIProvider):
     ) -> tuple[str, AICallRecord]:
         system = SUMMARY_SYSTEM.format(summary_type=summary_type)
         user = "Structured facts:\n" + json.dumps(patient_facts, default=str)
+        model = self._model_for("summary")
         t0 = time.perf_counter()
-        raw_text, raw_resp = await self._chat(system, user, json_mode=False)
+        raw_text, raw_resp = await self._chat(system, user, model=model, json_mode=False)
         latency_ms = int((time.perf_counter() - t0) * 1000)
         usage = raw_resp.get("usage") or {}
         prompt_tok = usage.get("prompt_tokens")
@@ -715,13 +729,13 @@ class OpenAICompatibleProvider(AIProvider):
         total_tok = usage.get("total_tokens")
         rec = AICallRecord(
             call_type="summary",
-            model=self.model,
+            model=model,
             prompt_tokens=prompt_tok,
             completion_tokens=completion_tok,
             total_tokens=total_tok,
             latency_ms=latency_ms,
             cost_usd=compute_cost(
-                load_rates(self.model),
+                load_rates(model),
                 prompt_tokens=prompt_tok or 0,
                 completion_tokens=completion_tok or 0,
             ),

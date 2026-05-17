@@ -31,7 +31,14 @@ class Settings(BaseSettings):
     AI_PROVIDER: str = "mock"  # mock | openai | custom
     AI_BASE_URL: str = ""
     AI_API_KEY: str = ""
+
+    # Default chat model. Used when no per-task override is set.
     AI_MODEL: str = "gpt-4o-mini"
+    # Per-task overrides — leave blank to fall back to AI_MODEL.
+    AI_MODEL_EXTRACT: str = ""
+    AI_MODEL_SUMMARY: str = ""
+    AI_MODEL_CODING: str = ""
+
     AI_EMBEDDING_MODEL: str = "text-embedding-3-small"
 
     # Coding standards toggles

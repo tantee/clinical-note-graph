@@ -37,6 +37,10 @@ const stubs = {
     props: ['modelValue'], emits: ['update:modelValue', 'update:search'],
     template: '<input data-test="patient" :value="modelValue" @input="$emit(\'update:modelValue\', $event.target.value)"/>',
   },
+  'v-combobox': {
+    props: ['modelValue'], emits: ['update:modelValue', 'update:search'],
+    template: '<input data-test="patient" :value="modelValue" @input="$emit(\'update:modelValue\', $event.target.value)"/>',
+  },
   'v-select': true,
   'v-btn': { template: '<button data-test-btn :data-label="$attrs[\'data-label\'] || \'\'" @click="$emit(\'click\')"><slot/></button>' },
   'v-menu': { template: '<div><slot/></div>' },
