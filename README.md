@@ -90,6 +90,8 @@ You can configure providers three ways:
 - `PATCH /api/config` — overrides are stored in Postgres and merged into runtime settings without restarting.
 - Visit `/#/config` in the UI and click **Quick setup** — it fills OpenRouter / OpenAI / Groq presets so you only need to paste your key.
 
+You can also use a different model **per task** (extract, summary, coding) on top of a single provider — see [Per-task model overrides](#per-task-model-overrides) below.
+
 ### Provider quick-reference
 
 | Provider | Key URL | `AI_BASE_URL` | Notes |
@@ -127,15 +129,65 @@ OpenRouter exposes hundreds of models behind a single key, including the latest 
      -d '{"AI_PROVIDER":"openai","AI_BASE_URL":"https://openrouter.ai/api/v1","AI_API_KEY":"sk-or-v1-...","AI_MODEL":"anthropic/claude-3.5-sonnet"}'
    ```
 
+### Per-task model overrides
+
+Two knobs cover the basic case: `AI_MODEL` (default chat model) + `AI_EMBEDDING_MODEL` (embeddings). They apply to **every** chat call (`extract`, `summary`, `coding`) and every embed call respectively.
+
+If you want a stronger model for the strict-JSON extract step but a cheap one for summaries, set the per-task overrides. Each falls back to `AI_MODEL` when blank:
+
+| Env var | What it overrides |
+|---|---|
+| `AI_MODEL` | Default for any chat task that doesn't have a per-task override |
+| `AI_MODEL_EXTRACT` | `POST /api/emr/ingest` — the strict-JSON extraction call |
+| `AI_MODEL_SUMMARY` | `POST /api/patient/{id}/summary` |
+| `AI_MODEL_CODING` | `POST /api/patient/{id}/coding/suggest` |
+| `AI_EMBEDDING_MODEL` | Every `embed` call (per-note + per-problem) |
+
+Example `.env`:
+
+```env
+AI_PROVIDER=openai
+AI_BASE_URL=https://openrouter.ai/api/v1
+AI_API_KEY=sk-or-v1-…
+
+# Best schema-following model for the heavy extraction step…
+AI_MODEL_EXTRACT=anthropic/claude-3.5-sonnet
+
+# …a cheap model for the cosmetic summary…
+AI_MODEL_SUMMARY=openai/gpt-4o-mini
+
+# …and the default catches anything else (coding, future call types).
+AI_MODEL=anthropic/claude-3.5-haiku
+
+AI_EMBEDDING_MODEL=openai/text-embedding-3-small
+```
+
+Three ways to change them (any one works, all merge into the same effective settings):
+
+1. **UI** — `/#/config` → AI provider card → fill in the per-task fields → Save.
+2. **API** — `PATCH /api/config` with any subset of the keys:
+
+   ```bash
+   curl -X PATCH http://localhost/api/config \
+     -H 'Content-Type: application/json' \
+     -d '{
+       "AI_MODEL": "anthropic/claude-3.5-haiku",
+       "AI_MODEL_EXTRACT": "anthropic/claude-3.5-sonnet",
+       "AI_MODEL_SUMMARY": "openai/gpt-4o-mini"
+     }'
+   ```
+
+   The overrides land in the `app_config` table and merge into `Settings` on every read — no restart required.
+3. **`.env`** — set the env vars and `docker compose up`. Persistent DB overrides (1 + 2) take precedence over env defaults.
+
+The Debug page's *By model* table breaks down spend per actual model used, so you can A/B different choices and compare token + dollar costs side-by-side.
+
 ### Model picks by task
 
-The strict-JSON extraction step (`/api/emr/ingest`) is the heaviest call. It's where you want a model that follows JSON schemas tightly. Suggested defaults:
-
-- **Best quality:** `anthropic/claude-3.5-sonnet` (via OpenRouter) or `gpt-4o`. Good clinical entity recognition, holds the schema.
-- **Cheap and fast:** `gpt-4o-mini`, `google/gemini-2.0-flash-001`, or `anthropic/claude-3.5-haiku`. The mock extractor is a useful baseline — start there to confirm the pipeline before paying for tokens.
-- **Reasoning-heavy edge cases:** `deepseek-reasoner` or `openai/o4-mini`. Slower, but better at resolving contradictions across documents.
-
-Embeddings: `openai/text-embedding-3-small` is fine; the mock provider returns an empty vector so the pgvector pipeline cleanly skips inserts when no embedding model is configured.
+- **Best quality for `extract`** (the JSON-schema-following call): `anthropic/claude-3.5-sonnet` or `gpt-4o`. Strong clinical entity recognition, holds the schema reliably.
+- **Cheap-and-fast** for `summary` and as the overall default: `gpt-4o-mini`, `google/gemini-2.0-flash-001`, or `anthropic/claude-3.5-haiku`. Start with `mock` (offline, $0) to verify the pipeline before paying.
+- **Reasoning-heavy edge cases** (resolving contradictions across documents): `deepseek-reasoner` or `openai/o4-mini`. Slower, but better with chain-of-thought.
+- **Embeddings:** `openai/text-embedding-3-small` is the sensible default. The `mock` provider returns an empty vector, so when offline the pgvector pipeline cleanly skips inserts.
 
 ---
 
