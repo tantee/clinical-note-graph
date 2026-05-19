@@ -13,7 +13,7 @@ const routes = [
   {
     path: '/patient/:id/encounter/:eid',
     name: 'encounter',
-    component: () => import('./views/EncounterDetail.vue'),
+    component: PatientDetail,
     props: true,
   },
   { path: '/ingest', component: IngestView, name: 'ingest' },

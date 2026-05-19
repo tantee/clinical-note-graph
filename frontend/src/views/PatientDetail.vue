@@ -254,12 +254,19 @@
         </v-card>
       </v-window-item>
     </v-window>
+
+    <EncounterDialog
+      v-if="route.params.eid"
+      :patient-id="id"
+      :eid="String(route.params.eid)"
+      @close="closeEncounter"
+    />
   </div>
 </template>
 
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { FACT_TYPE_META } from '../constants/clinical.js'
 import {
   getPatient, getTimeline, getGraph, getNotes, getNote,
@@ -275,10 +282,12 @@ import EmptyState from '../components/EmptyState.vue'
 import FactCard from '../components/FactCard.vue'
 import SummaryCard from '../components/SummaryCard.vue'
 import CodingCard from '../components/CodingCard.vue'
+import EncounterDialog from './EncounterDialog.vue'
 
 const props = defineProps({ id: { type: String, required: true } })
 const ui = useUiStore()
 const router = useRouter()
+const route = useRoute()
 
 const tab = ref('overview')
 const loading = ref(true)
@@ -370,6 +379,10 @@ async function selectEncounter(e) {
 
 function openEncounter(e) {
   router.push({ name: 'encounter', params: { id: props.id, eid: e.encounter_id } })
+}
+
+function closeEncounter() {
+  router.push({ name: 'patient', params: { id: props.id } })
 }
 
 async function openDocument(documentId) {
