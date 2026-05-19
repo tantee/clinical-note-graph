@@ -93,6 +93,7 @@ class FakeStore:
         }
         self.embeddings: list[dict] = []
         self.pricing: dict[str, dict] = {}
+        self.patient_summaries: list[dict] = []
 
     def execute(self, sql: str, params: dict[str, Any]) -> FakeResult:
         s = sql.lower()
@@ -138,6 +139,38 @@ class FakeStore:
                     "extra": json.loads(p["extra"]) if isinstance(p.get("extra"), str) else (p.get("extra") or {}),
                 })
             return FakeResult([])
+        if s.startswith("insert into patient_summaries"):
+            row = {
+                "id": f"ps-{len(self.patient_summaries)}",
+                "patient_id": params.get("pid"),
+                "kind": params.get("kind") if params.get("kind") is not None else (
+                    "summary" if params.get("md") is not None else "coding"
+                ),
+                "encounter_id": params.get("eid"),
+                "type": params.get("tp"),
+                "model": params.get("mdl"),
+                "markdown": params.get("md"),
+                "payload": json.loads(params["p"]) if isinstance(params.get("p"), str) else params.get("p"),
+                "evidence": json.loads(params["ev"]) if isinstance(params.get("ev"), str) else params.get("ev"),
+                "cost_usd": params.get("cost"),
+                "latency_ms": params.get("lat"),
+                "vault_path": params.get("vp"),
+                "created_at": "2026-05-19T00:00:00+00:00",
+            }
+            self.patient_summaries.append(row)
+            return FakeResult([{"id": row["id"], "created_at": row["created_at"]}])
+        if "from patient_summaries" in s:
+            pid = params.get("pid")
+            eid = params.get("eid")
+            kind = "coding" if "kind = 'coding'" in s else "summary"
+            rows = [
+                r for r in self.patient_summaries
+                if r["patient_id"] == pid
+                and r["kind"] == kind
+                and (eid is None or r.get("encounter_id") == eid)
+            ]
+            rows.sort(key=lambda r: r["created_at"], reverse=True)
+            return FakeResult(rows[:1])
         if s.startswith("insert into ai_outputs"):
             self.ai_outputs.append({
                 "id": f"ai-{len(self.ai_outputs)}",
@@ -278,6 +311,9 @@ class FakeStore:
                 rows = [p for p in self.patients.values() if q in (p.get("name") or "").lower() or q in p["patient_id"].lower()]
                 return FakeResult(rows)
             return FakeResult(list(self.patients.values()))
+        if "from encounters" in s and "where encounter_id" in s:
+            row = self.encounters.get(params.get("eid"))
+            return FakeResult([row] if row else [])
         if " from encounters " in s or " from encounters\n" in s:
             pid = params.get("pid")
             base = [e for e in self.encounters.values() if e["patient_id"] == pid]
@@ -289,17 +325,36 @@ class FakeStore:
         if " from facts " in s or "from facts\n" in s:
             pid = params.get("pid")
             did = params.get("did")
-            rows = [f for f in self.facts if f.get("patient_id") == pid and (did is None or f.get("document_id") == did)]
+            eid = params.get("eid")
+            if eid is not None and pid is None:
+                # encounter-scoped query: WHERE encounter_id = :eid AND review_status <> 'rejected'
+                rows = [f for f in self.facts if f.get("encounter_id") == eid and f.get("review_status") != "rejected"]
+            elif eid is not None and pid is not None:
+                # background query: WHERE patient_id = :pid AND encounter_id <> :eid AND review_status <> 'rejected'
+                bg_types = ("condition", "medication", "allergy")
+                rows = [
+                    f for f in self.facts
+                    if f.get("patient_id") == pid
+                    and (f.get("encounter_id") is None or f.get("encounter_id") != eid)
+                    and f.get("review_status") != "rejected"
+                    and f.get("type") in bg_types
+                ]
+            else:
+                rows = [f for f in self.facts if f.get("patient_id") == pid and (did is None or f.get("document_id") == did)]
             return FakeResult(rows)
         if " from documents " in s or "from documents\n" in s:
             pid = params.get("pid")
             did = params.get("did")
             eid = params.get("eid")
-            rows = [d for d in self.documents.values() if d["patient_id"] == pid]
-            if did is not None:
-                rows = [d for d in rows if d["document_id"] == did]
-            if eid is not None:
-                rows = [d for d in rows if d["encounter_id"] == eid]
+            if eid is not None and pid is None:
+                # encounter-scoped query: WHERE encounter_id = :eid
+                rows = [d for d in self.documents.values() if d.get("encounter_id") == eid]
+            else:
+                rows = [d for d in self.documents.values() if d["patient_id"] == pid]
+                if did is not None:
+                    rows = [d for d in rows if d["document_id"] == did]
+                if eid is not None:
+                    rows = [d for d in rows if d["encounter_id"] == eid]
             return FakeResult(rows)
         # Aggregations on ai_outputs — summary + per-model + per-day.
         # These must fire BEFORE the generic `from ai_outputs` branch below.

@@ -46,3 +46,112 @@ def gather_patient_facts(patient_id: str, *, start: str | None = None, end: str 
         "diagnoses": grouped.get("diagnosis_candidate", []),
         "codingCandidates": grouped.get("coding_candidate", []),
     }
+
+
+def gather_encounter_facts(encounter_id: str) -> dict[str, Any]:
+    """Aggregate facts for a single encounter plus background patient context.
+
+    Returns:
+      encounter:     {encounterId, type, dateTime, department, provider}
+      thisEncounter: {problems, medications, observations, procedures,
+                      plans, allergies, diagnoses, codingCandidates}
+                     <- facts WHERE encounter_id = :eid AND review_status <> 'rejected'
+      background:    {chronicProblems, homeMedications, knownAllergies}
+                     <- latest fact per normalized_code (or value if no code)
+                       across all OTHER encounters; rejected facts excluded;
+                       limited to types in (condition, medication, allergy).
+      documents:     [{documentId, format, version, ...}]
+
+    Raises LookupError if the encounter does not exist.
+    """
+    with db_session() as s:
+        enc = s.execute(
+            text("SELECT * FROM encounters WHERE encounter_id = :eid"),
+            {"eid": encounter_id},
+        ).mappings().first()
+        if not enc:
+            raise LookupError(f"encounter {encounter_id!r} not found")
+
+        patient_id = enc["patient_id"]
+        this_rows = s.execute(
+            text(
+                "SELECT * FROM facts "
+                "WHERE encounter_id = :eid AND review_status <> 'rejected' "
+                "ORDER BY date_time NULLS LAST, created_at ASC"
+            ),
+            {"eid": encounter_id},
+        ).mappings().all()
+        bg_rows = s.execute(
+            text(
+                "SELECT * FROM facts "
+                "WHERE patient_id = :pid AND (encounter_id IS NULL OR encounter_id <> :eid) "
+                "AND review_status <> 'rejected' "
+                "AND type IN ('condition', 'medication', 'allergy') "
+                "ORDER BY date_time NULLS LAST, created_at ASC"
+            ),
+            {"pid": patient_id, "eid": encounter_id},
+        ).mappings().all()
+        docs = s.execute(
+            text("SELECT * FROM documents WHERE encounter_id = :eid"),
+            {"eid": encounter_id},
+        ).mappings().all()
+
+    def _norm(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        out = []
+        for r in rows:
+            d = dict(r)
+            if d.get("id") is not None:
+                d["id"] = str(d["id"])
+            if d.get("confidence") is not None:
+                d["confidence"] = float(d["confidence"])
+            out.append(d)
+        return out
+
+    this_grouped: dict[str, list[dict[str, Any]]] = {}
+    for f in _norm(this_rows):
+        this_grouped.setdefault(f["type"], []).append(f)
+
+    # Background: dedupe — keep one row per normalized_code (or value if no code).
+    # Rows come in ASC order, so the last write wins for "latest mention".
+    bg_by_key: dict[str, dict[str, Any]] = {}
+    bg_by_type: dict[str, list[str]] = {"condition": [], "medication": [], "allergy": []}
+    for f in _norm(bg_rows):
+        key = f"{f['type']}|{f.get('normalized_code') or f['value']}"
+        if key not in bg_by_key:
+            bg_by_type[f["type"]].append(key)
+        bg_by_key[key] = f
+
+    return {
+        "encounter": {
+            "encounterId": enc["encounter_id"],
+            "patientId": enc["patient_id"],
+            "type": enc["type"],
+            "dateTime": str(enc["date_time"]) if enc.get("date_time") else None,
+            "department": enc.get("department"),
+            "provider": enc.get("provider"),
+        },
+        "thisEncounter": {
+            "problems": this_grouped.get("condition", []),
+            "medications": this_grouped.get("medication", []),
+            "observations": this_grouped.get("observation", []),
+            "procedures": this_grouped.get("procedure", []),
+            "plans": this_grouped.get("plan", []),
+            "allergies": this_grouped.get("allergy", []),
+            "diagnoses": this_grouped.get("diagnosis_candidate", []),
+            "codingCandidates": this_grouped.get("coding_candidate", []),
+        },
+        "background": {
+            "chronicProblems": [bg_by_key[k] for k in bg_by_type["condition"]],
+            "homeMedications": [bg_by_key[k] for k in bg_by_type["medication"]],
+            "knownAllergies": [bg_by_key[k] for k in bg_by_type["allergy"]],
+        },
+        "documents": [
+            {
+                "documentId": d["document_id"],
+                "encounterId": d.get("encounter_id"),
+                "format": d.get("format"),
+                "version": d.get("version"),
+            }
+            for d in docs
+        ],
+    }
