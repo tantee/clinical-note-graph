@@ -10,6 +10,12 @@ const routes = [
   { path: '/', redirect: '/patients' },
   { path: '/patients', component: PatientsView, name: 'patients' },
   { path: '/patients/:id', component: PatientDetail, name: 'patient', props: true },
+  {
+    path: '/patient/:id/encounter/:eid',
+    name: 'encounter',
+    component: () => import('./views/EncounterDetail.vue'),
+    props: true,
+  },
   { path: '/ingest', component: IngestView, name: 'ingest' },
   { path: '/config', component: ConfigView, name: 'config' },
   { path: '/debug', component: DebugView, name: 'debug' },
