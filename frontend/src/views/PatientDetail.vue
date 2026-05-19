@@ -317,7 +317,7 @@ async function load() {
     const [p, t, g, n, sum, cod, encs] = await Promise.all([
       getPatient(props.id, ctl.signal),
       getTimeline(props.id, ctl.signal),
-      getGraph(props.id, ctl.signal),
+      getGraph(props.id, { signal: ctl.signal }),
       getNotes(props.id, ctl.signal),
       getLatestSummary(props.id).catch(() => null),
       getLatestCoding(props.id).catch(() => null),
