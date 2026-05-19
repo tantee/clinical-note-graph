@@ -259,7 +259,7 @@
 
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRouter, useRoute } from 'vue-router'
 import { FACT_TYPE_META } from '../constants/clinical.js'
 import {
   getPatient, getTimeline, getGraph, getNotes, getNote,
@@ -279,6 +279,20 @@ import CodingCard from '../components/CodingCard.vue'
 const props = defineProps({ id: { type: String, required: true } })
 const ui = useUiStore()
 const router = useRouter()
+const route = useRoute()
+
+// Open a note when ?note=<path> is in the URL — used by citation badges
+// on the vector demo page to deep-link into a specific source.
+watch(
+  () => route.query.note,
+  (path) => {
+    if (path && notes.value.length) {
+      tab.value = 'notes'
+      openNote(String(path))
+    }
+  },
+  { immediate: true },
+)
 
 const tab = ref('overview')
 const loading = ref(true)
@@ -330,7 +344,11 @@ async function load() {
     summary.value = sum || null
     codingResp.value = cod?.payload || null
     encounters.value = encs
-    if (notes.value.length) {
+    // Re-apply ?note= after notes are fetched (in case the watcher fired before notes.value was populated)
+    if (route.query.note && notes.value.length) {
+      tab.value = 'notes'
+      openNote(String(route.query.note))
+    } else if (notes.value.length) {
       const idx = notes.value.find((f) => f.path.endsWith('index.md')) || notes.value[0]
       openNote(idx.path)
     } else {
