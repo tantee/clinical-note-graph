@@ -12,13 +12,22 @@ from app.db.postgres import db_session
 from app.services.runtime_config import effective as effective_settings
 
 
-def _vault_summary_path(patient_id: str, kind: str, summary_type: str | None, created_at: datetime) -> Path:
-    """`patients/<HN>/summaries/<YYYY-MM-DD-HHMMSS>-<kind>[-<type>].md` under VAULT_PATH."""
+def _vault_summary_path(
+    patient_id: str, kind: str, summary_type: str | None,
+    encounter_id: str | None, created_at: datetime,
+) -> Path:
+    """Encounter-scoped: patients/<HN>/encounters/<eid>/<kind>-<type>.md (overwritten).
+       Patient-level:    patients/<HN>/summaries/<ts>-<kind>[-<type>].md (timestamped)."""
     settings = effective_settings()
     safe_pid = re.sub(r"[^A-Za-z0-9._-]+", "-", patient_id)
-    date_str = created_at.strftime("%Y-%m-%d-%H%M%S")
     suffix = f"-{summary_type}" if summary_type else ""
-    return Path(settings.VAULT_PATH) / "patients" / safe_pid / "summaries" / f"{date_str}-{kind}{suffix}.md"
+    if encounter_id:
+        safe_eid = re.sub(r"[^A-Za-z0-9._-]+", "-", encounter_id)
+        return (Path(settings.VAULT_PATH) / "patients" / safe_pid /
+                "encounters" / safe_eid / f"{kind}{suffix}.md")
+    date_str = created_at.strftime("%Y-%m-%d-%H%M%S")
+    return (Path(settings.VAULT_PATH) / "patients" / safe_pid /
+            "summaries" / f"{date_str}-{kind}{suffix}.md")
 
 
 def _write_summary_markdown(path: Path, *, patient_id: str, kind: str, summary_type: str | None,
@@ -45,12 +54,44 @@ def _write_summary_markdown(path: Path, *, patient_id: str, kind: str, summary_t
     path.write_text("\n".join(lines), encoding="utf-8")
 
 
+def _render_coding_markdown(payload: dict[str, Any]) -> str:
+    """Render the coding response as a small markdown summary for the vault."""
+    lines: list[str] = ["# Suggested coding", ""]
+    primary = payload.get("primaryDiagnosis")
+    if primary:
+        codes = []
+        if primary.get("icd10"):
+            codes.append(f"ICD-10 {primary['icd10']}")
+        if primary.get("snomed"):
+            codes.append(f"SNOMED {primary['snomed']}")
+        suffix = f" ({', '.join(codes)})" if codes else ""
+        lines.append(f"**Primary:** {primary.get('condition', '?')}{suffix}")
+        lines.append("")
+    if payload.get("secondaryDiagnoses"):
+        lines.append("## Secondary")
+        for d in payload["secondaryDiagnoses"]:
+            codes = []
+            if d.get("icd10"):
+                codes.append(f"ICD-10 {d['icd10']}")
+            if d.get("snomed"):
+                codes.append(f"SNOMED {d['snomed']}")
+            suffix = f" ({', '.join(codes)})" if codes else ""
+            lines.append(f"- {d.get('condition', '?')}{suffix}")
+    if payload.get("warnings"):
+        lines.append("")
+        lines.append("## Warnings")
+        for w in payload["warnings"]:
+            lines.append(f"- {w}")
+    return "\n".join(lines)
+
+
 def save_summary(
-    *, patient_id: str, summary_type: str, markdown: str, evidence: dict[str, Any] | None,
-    model: str | None, cost_usd, latency_ms: int | None,
+    *, patient_id: str, summary_type: str, markdown: str,
+    evidence: dict[str, Any] | None, model: str | None, cost_usd,
+    latency_ms: int | None, encounter_id: str | None = None,
 ) -> dict[str, Any]:
     created = datetime.now(timezone.utc)
-    vault_path = _vault_summary_path(patient_id, "summary", summary_type, created)
+    vault_path = _vault_summary_path(patient_id, "summary", summary_type, encounter_id, created)
     try:
         _write_summary_markdown(
             vault_path,
@@ -66,14 +107,17 @@ def save_summary(
             text(
                 """
                 INSERT INTO patient_summaries
-                    (patient_id, kind, type, model, markdown, evidence, cost_usd, latency_ms, vault_path)
+                    (patient_id, kind, type, encounter_id, model, markdown,
+                     evidence, cost_usd, latency_ms, vault_path)
                 VALUES
-                    (:pid, 'summary', :tp, :mdl, :md, CAST(:ev AS jsonb), :cost, :lat, :vp)
+                    (:pid, 'summary', :tp, :eid, :mdl, :md,
+                     CAST(:ev AS jsonb), :cost, :lat, :vp)
                 RETURNING id, created_at
                 """
             ),
             {
-                "pid": patient_id, "tp": summary_type, "mdl": model, "md": markdown,
+                "pid": patient_id, "tp": summary_type, "eid": encounter_id,
+                "mdl": model, "md": markdown,
                 "ev": json.dumps(evidence) if evidence is not None else None,
                 "cost": cost_usd, "lat": latency_ms, "vp": rel_path,
             },
@@ -83,42 +127,68 @@ def save_summary(
 
 def save_coding(
     *, patient_id: str, payload: dict[str, Any], model: str | None,
-    cost_usd, latency_ms: int | None,
+    cost_usd, latency_ms: int | None, encounter_id: str | None = None,
 ) -> dict[str, Any]:
+    # Coding gets a vault file too when encounter-scoped — clinicians want to
+    # see the suggested codes in Obsidian alongside the discharge summary.
+    vault_path = None
+    if encounter_id:
+        created = datetime.now(timezone.utc)
+        path = _vault_summary_path(patient_id, "coding", None, encounter_id, created)
+        try:
+            md = _render_coding_markdown(payload)
+            _write_summary_markdown(
+                path, patient_id=patient_id, kind="coding", summary_type=None,
+                model=model, cost_usd=cost_usd, latency_ms=latency_ms, body_md=md,
+            )
+            settings = effective_settings()
+            vault_path = str(path.relative_to(settings.VAULT_PATH))
+        except Exception:
+            vault_path = None
     with db_session() as s:
         row = s.execute(
             text(
                 """
                 INSERT INTO patient_summaries
-                    (patient_id, kind, model, payload, cost_usd, latency_ms)
+                    (patient_id, kind, encounter_id, model, payload,
+                     cost_usd, latency_ms, vault_path)
                 VALUES
-                    (:pid, 'coding', :mdl, CAST(:p AS jsonb), :cost, :lat)
+                    (:pid, 'coding', :eid, :mdl, CAST(:p AS jsonb),
+                     :cost, :lat, :vp)
                 RETURNING id, created_at
                 """
             ),
             {
-                "pid": patient_id, "mdl": model,
+                "pid": patient_id, "eid": encounter_id, "mdl": model,
                 "p": json.dumps(payload, default=str),
-                "cost": cost_usd, "lat": latency_ms,
+                "cost": cost_usd, "lat": latency_ms, "vp": vault_path,
             },
         ).mappings().first()
-    return {"id": str(row["id"]), "createdAt": row["created_at"].isoformat()}
+    return {"id": str(row["id"]), "createdAt": row["created_at"].isoformat(), "vaultPath": vault_path}
 
 
-def latest_summary(patient_id: str) -> dict[str, Any] | None:
+def latest_summary(patient_id: str, encounter_id: str | None = None) -> dict[str, Any] | None:
     with db_session() as s:
-        row = s.execute(
-            text(
-                """
-                SELECT id, type, model, markdown, evidence, cost_usd, latency_ms, vault_path, created_at
-                FROM patient_summaries
-                WHERE patient_id = :pid AND kind = 'summary'
-                ORDER BY created_at DESC
-                LIMIT 1
-                """
-            ),
-            {"pid": patient_id},
-        ).mappings().first()
+        if encounter_id is None:
+            row = s.execute(
+                text(
+                    "SELECT id, type, model, markdown, evidence, cost_usd, latency_ms, "
+                    "vault_path, created_at FROM patient_summaries "
+                    "WHERE patient_id = :pid AND kind = 'summary' "
+                    "AND encounter_id IS NULL ORDER BY created_at DESC LIMIT 1"
+                ),
+                {"pid": patient_id},
+            ).mappings().first()
+        else:
+            row = s.execute(
+                text(
+                    "SELECT id, type, model, markdown, evidence, cost_usd, latency_ms, "
+                    "vault_path, created_at FROM patient_summaries "
+                    "WHERE patient_id = :pid AND kind = 'summary' "
+                    "AND encounter_id = :eid ORDER BY created_at DESC LIMIT 1"
+                ),
+                {"pid": patient_id, "eid": encounter_id},
+            ).mappings().first()
     if not row:
         return None
     return {
@@ -134,20 +204,28 @@ def latest_summary(patient_id: str) -> dict[str, Any] | None:
     }
 
 
-def latest_coding(patient_id: str) -> dict[str, Any] | None:
+def latest_coding(patient_id: str, encounter_id: str | None = None) -> dict[str, Any] | None:
     with db_session() as s:
-        row = s.execute(
-            text(
-                """
-                SELECT id, model, payload, cost_usd, latency_ms, created_at
-                FROM patient_summaries
-                WHERE patient_id = :pid AND kind = 'coding'
-                ORDER BY created_at DESC
-                LIMIT 1
-                """
-            ),
-            {"pid": patient_id},
-        ).mappings().first()
+        if encounter_id is None:
+            row = s.execute(
+                text(
+                    "SELECT id, model, payload, cost_usd, latency_ms, created_at "
+                    "FROM patient_summaries "
+                    "WHERE patient_id = :pid AND kind = 'coding' "
+                    "AND encounter_id IS NULL ORDER BY created_at DESC LIMIT 1"
+                ),
+                {"pid": patient_id},
+            ).mappings().first()
+        else:
+            row = s.execute(
+                text(
+                    "SELECT id, model, payload, cost_usd, latency_ms, created_at "
+                    "FROM patient_summaries "
+                    "WHERE patient_id = :pid AND kind = 'coding' "
+                    "AND encounter_id = :eid ORDER BY created_at DESC LIMIT 1"
+                ),
+                {"pid": patient_id, "eid": encounter_id},
+            ).mappings().first()
     if not row:
         return None
     return {
