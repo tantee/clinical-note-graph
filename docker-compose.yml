@@ -59,6 +59,9 @@ services:
       AI_BASE_URL: ${AI_BASE_URL:-}
       AI_API_KEY: ${AI_API_KEY:-}
       AI_MODEL: ${AI_MODEL:-gpt-4o-mini}
+      AI_MODEL_EXTRACT: ${AI_MODEL_EXTRACT-}
+      AI_MODEL_SUMMARY: ${AI_MODEL_SUMMARY-}
+      AI_MODEL_CODING: ${AI_MODEL_CODING-}
       AI_EMBEDDING_MODEL: ${AI_EMBEDDING_MODEL:-text-embedding-3-small}
       CORS_ORIGINS: ${CORS_ORIGINS:-*}
       API_KEY: ${BACKEND_API_KEY:-}

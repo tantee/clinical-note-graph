@@ -21,7 +21,7 @@ A Dockerised prototype that turns inbound EMR documents into:
 | Layer | Choice | Why |
 |---|---|---|
 | Backend | **FastAPI** (Python 3.12) | Pydantic gives strict JSON-schema validation for AI output — central to the safety story. Built-in OpenAPI/Swagger at `/docs`. Native async for parallel I/O. |
-| Frontend | **Vue 3 + Vuetify 3** | Per spec. Vite dev server, multi-stage prod build served by nginx. |
+| Frontend | **Vue 3 + Vuetify 4** | Per spec. Vite dev server, multi-stage prod build served by nginx. |
 | Relational DB | **PostgreSQL 16 + pgvector** | One image carries relational state and embeddings. |
 | Graph DB | **Neo4j 5 (community)** | Standard, mature Cypher tooling. Writes use `UNWIND` for one Cypher round-trip per fact type. |
 | AI | Pluggable provider — `mock` or any OpenAI-compatible endpoint (**OpenRouter**, OpenAI, Groq, vLLM, …) | Defaults to deterministic mock so the stack runs offline. OpenRouter is the recommended production path: one key, many models. |
