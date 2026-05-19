@@ -11,6 +11,16 @@ body {
   min-height: 100vh;
 }
 
+/* v-window clips its content with overflow:hidden so sliding tab transitions
+   stay inside the tab body. That same clip eats card drop-shadows on the
+   edges. Padding on the window itself + negative margin keeps the layout
+   identical while giving shadows ~6px of breathing room inside the clip box.
+   The surrounding v-container's default padding absorbs the negative margin. */
+.v-window {
+  padding: 6px;
+  margin: -6px;
+}
+
 .cng-mono,
 pre.cng-mono,
 code.cng-mono {
@@ -22,11 +32,26 @@ pre.cng-raw {
   font-family: var(--md-mono);
   font-size: 12px;
   white-space: pre-wrap;
-  background: rgba(127, 127, 127, 0.06);
+  background: rgb(var(--v-theme-on-surface) / 0.04);
   padding: 12px;
   border-radius: 8px;
   max-height: 500px;
   overflow: auto;
+  margin: 0;
+}
+
+pre.cng-raw.cng-raw-fill {
+  max-height: none;
+}
+
+/* Three-column EMR-vs-facts row: fills the visible viewport below the tabs
+   and lets each card scroll its own body. Heights can't be expressed cleanly
+   with Vuetify utility classes alone, so keep a single rule for the row.
+   The cards themselves use d-flex flex-column h-100 + flex-grow-1 / overflow-y-auto
+   on inner sections — straight Vuetify v4 utility classes. */
+.cng-emr-row {
+  height: calc(100vh - 260px);
+  min-height: 420px;
 }
 
 .cng-markdown :deep(h1),

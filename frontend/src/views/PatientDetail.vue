@@ -17,8 +17,12 @@
       </div>
       <v-spacer />
       <v-btn class="mr-2" variant="text" prepend-icon="mdi-note-plus-outline" :to="{ name: 'ingest', query: { patientId: id } }">Add note</v-btn>
-      <v-btn class="mr-2" color="primary" variant="tonal" prepend-icon="mdi-text-box-outline" :loading="busy.summary" @click="loadSummary">Summary</v-btn>
-      <v-btn color="primary" variant="tonal" prepend-icon="mdi-medical-bag-outline" :loading="busy.coding" @click="loadCoding">Coding</v-btn>
+      <v-btn class="mr-2" color="primary" variant="tonal" prepend-icon="mdi-text-box-outline" :loading="busy.summary" @click="loadSummary">
+        {{ summary ? 'Regenerate summary' : 'Summary' }}
+      </v-btn>
+      <v-btn color="primary" variant="tonal" prepend-icon="mdi-medical-bag-outline" :loading="busy.coding" @click="loadCoding">
+        {{ codingResp ? 'Regenerate coding' : 'Coding' }}
+      </v-btn>
     </div>
 
     <v-tabs v-model="tab" color="primary" density="comfortable" show-arrows>
@@ -66,10 +70,17 @@
           </v-col>
         </v-row>
 
-        <v-card v-if="summary" class="mt-4">
+        <v-card v-if="summary" ref="summaryCard" class="mt-4">
           <SectionHeader title="AI summary" icon="mdi-text-box-outline">
-            <span class="text-caption text-grey-darken-1 ml-2">({{ summary.type }})</span>
-            <template #actions><v-chip size="x-small" color="warning" variant="tonal">AI-assisted</v-chip></template>
+            <span class="text-caption text-grey-darken-1 ml-2">
+              ({{ summary.type }}{{ summary.createdAt ? ' · ' + new Date(summary.createdAt).toLocaleString() : '' }})
+            </span>
+            <template #actions>
+              <v-chip v-if="summary.vaultPath" size="x-small" variant="tonal" prepend-icon="mdi-folder-outline" class="mr-1">
+                {{ summary.vaultPath }}
+              </v-chip>
+              <v-chip size="x-small" color="warning" variant="tonal">AI-assisted</v-chip>
+            </template>
           </SectionHeader>
           <v-divider />
           <v-card-text>
@@ -77,7 +88,7 @@
           </v-card-text>
         </v-card>
 
-        <v-card v-if="codingResp" class="mt-4">
+        <v-card v-if="codingResp" ref="codingCard" class="mt-4">
           <SectionHeader title="Coding suggestion" icon="mdi-medical-bag-outline">
             <template #actions><v-chip size="x-small" color="warning" variant="tonal">AI-assisted</v-chip></template>
           </SectionHeader>
@@ -116,16 +127,41 @@
             <v-card>
               <SectionHeader title="Files" icon="mdi-folder-multiple-outline" />
               <v-divider />
-              <v-list density="compact" nav>
+              <v-list density="compact" nav open-strategy="multiple" :opened="openedFolders">
+                <!-- Files at patient root (index.md, summary-x.md if any), no folder wrapper -->
                 <v-list-item
-                  v-for="f in notes"
+                  v-for="f in noteTree.rootFiles"
                   :key="f.path"
                   :title="f.name"
-                  :subtitle="f.kind"
                   :active="selectedNote?.path === f.path"
                   :prepend-icon="kindIcon(f.kind)"
                   @click="openNote(f.path)"
                 />
+                <v-list-group
+                  v-for="folder in noteTree.folders"
+                  :key="folder.kind"
+                  :value="folder.kind"
+                >
+                  <template #activator="{ props: a }">
+                    <v-list-item
+                      v-bind="a"
+                      :title="folder.label"
+                      :prepend-icon="kindIcon(folder.kind)"
+                      density="compact"
+                    >
+                      <template #append>
+                        <span class="text-caption text-grey-darken-1">{{ folder.files.length }}</span>
+                      </template>
+                    </v-list-item>
+                  </template>
+                  <v-list-item
+                    v-for="f in folder.files"
+                    :key="f.path"
+                    :title="f.name"
+                    :active="selectedNote?.path === f.path"
+                    @click="openNote(f.path)"
+                  />
+                </v-list-group>
                 <EmptyState v-if="!notes.length" icon="mdi-folder-open-outline" title="No notes yet" />
               </v-list>
             </v-card>
@@ -150,12 +186,12 @@
 
       <!-- Raw EMR vs facts -->
       <v-window-item value="raw">
-        <v-row>
-          <v-col cols="12" md="3">
-            <v-card>
+        <v-row class="cng-emr-row">
+          <v-col cols="12" md="3" class="d-flex">
+            <v-card class="d-flex flex-column flex-grow-1 overflow-hidden">
               <SectionHeader title="Documents" icon="mdi-file-multiple-outline" />
               <v-divider />
-              <v-list density="compact" nav>
+              <v-list density="compact" nav class="flex-grow-1 overflow-y-auto" style="min-height: 0;">
                 <v-list-item
                   v-for="d in encounterDocuments"
                   :key="d.document_id"
@@ -168,21 +204,21 @@
               </v-list>
             </v-card>
           </v-col>
-          <v-col cols="12" md="4">
-            <v-card>
+          <v-col cols="12" md="4" class="d-flex">
+            <v-card class="d-flex flex-column flex-grow-1 overflow-hidden">
               <SectionHeader title="Raw EMR" icon="mdi-text-box-outline" />
               <v-divider />
-              <v-card-text>
-                <pre v-if="selectedDocument?.document?.raw_content" class="cng-raw">{{ selectedDocument.document.raw_content }}</pre>
+              <v-card-text class="flex-grow-1 overflow-y-auto" style="min-height: 0;">
+                <pre v-if="selectedDocument?.document?.raw_content" class="cng-raw cng-raw-fill">{{ selectedDocument.document.raw_content }}</pre>
                 <EmptyState v-else icon="mdi-text-box-outline" title="No document selected" />
               </v-card-text>
             </v-card>
           </v-col>
-          <v-col cols="12" md="5">
-            <v-card>
+          <v-col cols="12" md="5" class="d-flex">
+            <v-card class="d-flex flex-column flex-grow-1 overflow-hidden">
               <SectionHeader title="Extracted facts" icon="mdi-format-list-bulleted-square" />
               <v-divider />
-              <v-list density="comfortable">
+              <v-list density="comfortable" class="flex-grow-1 overflow-y-auto" style="min-height: 0;">
                 <v-list-item v-for="f in selectedDocument?.facts || []" :key="f.id" :title="f.value">
                   <template #prepend>
                     <v-icon :color="FACT_TYPE_META[f.type]?.color || 'grey'">{{ FACT_TYPE_META[f.type]?.icon || 'mdi-circle-medium' }}</v-icon>
@@ -230,12 +266,13 @@
 </template>
 
 <script setup>
-import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { marked } from 'marked'
 import { FACT_TYPE_META } from '../constants/clinical.js'
 import {
   getPatient, getTimeline, getGraph, getNotes, getNote,
   getEncounterDocuments, getDocument, summarize, suggestCoding, reviewFact,
+  getLatestSummary, getLatestCoding,
 } from '../api/client.js'
 import { useUiStore } from '../stores/ui.js'
 import MarkdownViewer from '../components/MarkdownViewer.vue'
@@ -259,6 +296,8 @@ const encounterDocuments = ref([])
 const selectedDocument = ref(null)
 const summary = ref(null)
 const codingResp = ref(null)
+const summaryCard = ref(null)
+const codingCard = ref(null)
 const busy = reactive({ summary: false, coding: false })
 let activeAbort = null
 
@@ -268,16 +307,20 @@ async function load() {
   activeAbort = ctl
   loading.value = true
   try {
-    const [p, t, g, n] = await Promise.all([
+    const [p, t, g, n, sum, cod] = await Promise.all([
       getPatient(props.id, ctl.signal),
       getTimeline(props.id, ctl.signal),
       getGraph(props.id, ctl.signal),
       getNotes(props.id, ctl.signal),
+      getLatestSummary(props.id).catch(() => null),
+      getLatestCoding(props.id).catch(() => null),
     ])
     patient.value = p
     timeline.value = t
     graph.value = g
     notes.value = n.files
+    summary.value = sum || null
+    codingResp.value = cod?.payload || null
     if (notes.value.length) {
       const idx = notes.value.find((f) => f.path.endsWith('index.md')) || notes.value[0]
       openNote(idx.path)
@@ -320,15 +363,30 @@ async function openDocument(documentId) {
   selectedDocument.value = await getDocument(props.id, documentId)
 }
 
+async function revealCard(cardRef) {
+  // After an AI response, jump back to Overview and scroll the new card into
+  // view so the user doesn't wonder where the result landed.
+  tab.value = 'overview'
+  await nextTick()
+  const el = cardRef.value?.$el || cardRef.value
+  if (el?.scrollIntoView) el.scrollIntoView({ behavior: 'smooth', block: 'start' })
+}
+
 async function loadSummary() {
   busy.summary = true
-  try { summary.value = await summarize(props.id, { type: 'detailed', includeEvidence: true }) }
-  finally { busy.summary = false }
+  try {
+    summary.value = await summarize(props.id, { type: 'detailed', includeEvidence: true })
+    ui.success('Summary ready')
+    await revealCard(summaryCard)
+  } finally { busy.summary = false }
 }
 async function loadCoding() {
   busy.coding = true
-  try { codingResp.value = await suggestCoding(props.id, { standards: ['ICD10', 'SNOMEDCT'], includeEvidence: true }) }
-  finally { busy.coding = false }
+  try {
+    codingResp.value = await suggestCoding(props.id, { standards: ['ICD10', 'SNOMEDCT'], includeEvidence: true })
+    ui.success('Coding suggestion ready')
+    await revealCard(codingCard)
+  } finally { busy.coding = false }
 }
 
 async function onReviewChange(fact, status) {
@@ -345,13 +403,70 @@ async function onReviewChange(fact, status) {
 
 const renderedSummary = computed(() => marked.parse(summary.value?.markdown || ''))
 
+const FOLDER_ORDER = ['visits', 'summaries', 'problems', 'medications', 'observations', 'labs', 'plans', 'allergies', 'procedures', 'sources']
+const FOLDER_LABELS = {
+  visits: 'Visits',
+  summaries: 'Summaries',
+  problems: 'Problems',
+  medications: 'Medications',
+  observations: 'Observations',
+  labs: 'Labs',
+  plans: 'Plans',
+  allergies: 'Allergies',
+  procedures: 'Procedures',
+  sources: 'Source documents',
+}
+
+const noteTree = computed(() => {
+  const rootFiles = []
+  const byFolder = new Map()
+  for (const f of notes.value || []) {
+    // Root-level files have kind = 'index.md' or path with no extra slashes under patient root
+    const segments = f.path.split('/')
+    const isRoot = segments.length <= 3 // patients/<HN>/<file>
+    if (isRoot) {
+      rootFiles.push(f)
+    } else {
+      const folder = segments[2] // patients/<HN>/<folder>/<file>
+      if (!byFolder.has(folder)) byFolder.set(folder, [])
+      byFolder.get(folder).push(f)
+    }
+  }
+  const folders = []
+  const seen = new Set()
+  for (const key of FOLDER_ORDER) {
+    if (byFolder.has(key)) {
+      folders.push({ kind: key, label: FOLDER_LABELS[key] || key, files: byFolder.get(key) })
+      seen.add(key)
+    }
+  }
+  // Any folder not in FOLDER_ORDER (future entity types) — append alphabetically.
+  for (const [key, files] of [...byFolder.entries()].sort()) {
+    if (!seen.has(key)) folders.push({ kind: key, label: FOLDER_LABELS[key] || key, files })
+  }
+  return { rootFiles, folders }
+})
+
+// Auto-open the folder containing the currently selected file.
+const openedFolders = computed(() => {
+  if (!selectedNote.value) return ['visits', 'summaries']
+  const segs = selectedNote.value.path.split('/')
+  return segs.length > 3 ? [segs[2]] : ['visits', 'summaries']
+})
+
 function kindIcon(kind) {
   return {
     visits: 'mdi-calendar-text',
+    summaries: 'mdi-text-box-outline',
     problems: 'mdi-medical-bag',
     medications: 'mdi-pill',
+    observations: 'mdi-stethoscope',
     labs: 'mdi-chart-line',
+    plans: 'mdi-clipboard-list-outline',
+    allergies: 'mdi-allergy',
+    procedures: 'mdi-scalpel',
     sources: 'mdi-text-box',
+    'index.md': 'mdi-file-document-outline',
   }[kind] || 'mdi-file-document-outline'
 }
 

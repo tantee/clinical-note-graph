@@ -106,7 +106,11 @@
 
       <v-col cols="12">
         <v-card>
-          <SectionHeader title="Export profiles" icon="mdi-file-export-outline" />
+          <SectionHeader title="Export profiles" icon="mdi-file-export-outline">
+            <template #actions>
+              <v-btn size="small" variant="tonal" color="primary" prepend-icon="mdi-plus" @click="newProfile">New profile</v-btn>
+            </template>
+          </SectionHeader>
           <v-divider />
           <v-card-text>
             <v-row>
@@ -120,17 +124,29 @@
                     :active="selected?.profile_id === p.profile_id"
                     @click="selected = structuredClone(p)"
                   />
-                  <EmptyState v-if="!profiles.length" icon="mdi-file-export-outline" title="No profiles yet" />
+                  <EmptyState v-if="!profiles.length" icon="mdi-file-export-outline" title="No profiles yet"
+                              hint="Click 'New profile' to add one." />
                 </v-list>
               </v-col>
               <v-col cols="12" md="7">
                 <div v-if="selected">
-                  <v-text-field v-model="selected.profile_id" label="profileId" />
-                  <v-text-field v-model="selected.name" label="Name" />
-                  <v-textarea v-model="selectedConfigStr" label="Config (JSON)" rows="10" :error-messages="profileError ? [profileError] : []" />
-                  <v-btn color="primary" prepend-icon="mdi-content-save-outline" @click="saveProfile">Save profile</v-btn>
+                  <v-text-field v-model="selected.profile_id" label="profileId"
+                                hint="lowercase-with-dashes, used in URLs"
+                                persistent-hint />
+                  <v-text-field v-model="selected.name" label="Name" class="mt-2" />
+                  <v-textarea v-model="selectedConfigStr" label="Config (JSON)" rows="10"
+                              :error-messages="profileError ? [profileError] : []" class="mt-2" />
+                  <div class="d-flex">
+                    <v-btn color="primary" prepend-icon="mdi-content-save-outline"
+                           :disabled="!selected.profile_id || !selected.name || !!profileError"
+                           @click="saveProfile">Save profile</v-btn>
+                    <v-spacer />
+                    <v-btn variant="text" @click="selected = null">Cancel</v-btn>
+                  </div>
                 </div>
-                <v-alert v-else type="info" variant="tonal">Select a profile to edit.</v-alert>
+                <v-alert v-else type="info" variant="tonal">
+                  Select a profile to edit, or click <strong>New profile</strong> to add one.
+                </v-alert>
               </v-col>
             </v-row>
           </v-card-text>
@@ -233,9 +249,21 @@ function applyPreset(name) {
   // Don't touch AI_API_KEY — that's user-supplied and we never store the masked value.
   ui.success(`Applied ${name} preset. Set your API key, then Save.`)
 }
+function newProfile() {
+  selected.value = {
+    profile_id: '',
+    name: '',
+    config: { format: 'fhir', includeRejected: false, includeEvidence: true },
+  }
+}
+
 async function saveProfile() {
   if (profileError.value) {
     ui.error('Fix the JSON in the config field first.')
+    return
+  }
+  if (!selected.value.profile_id || !selected.value.name) {
+    ui.error('profileId and Name are required.')
     return
   }
   await upsertExportProfile({ profileId: selected.value.profile_id, name: selected.value.name, config: selected.value.config })

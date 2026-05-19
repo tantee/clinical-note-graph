@@ -55,8 +55,12 @@ export const upsertExportProfile = (p) =>
   api.put(`/api/config/export-profiles/${encodeURIComponent(p.profileId)}`, p).then(data)
 export const summarize = (id, body) =>
   api.post(`/api/patient/${encodeURIComponent(id)}/summary`, body).then(data)
+export const getLatestSummary = (id) =>
+  api.get(`/api/patient/${encodeURIComponent(id)}/summary/latest`).then(data)
 export const suggestCoding = (id, body) =>
   api.post(`/api/patient/${encodeURIComponent(id)}/coding/suggest`, body).then(data)
+export const getLatestCoding = (id) =>
+  api.get(`/api/patient/${encodeURIComponent(id)}/coding/latest`).then(data)
 export const reviewFact = (factId, status) =>
   api.patch(`/api/facts/${factId}/review`, null, { params: { status } }).then(data)
 export const exportPatient = (body) => api.post('/api/export', body).then(data)
