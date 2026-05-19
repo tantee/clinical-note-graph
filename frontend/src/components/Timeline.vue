@@ -15,7 +15,9 @@
             <div class="text-body-2">{{ formatDate(e.date_time) }}</div>
             <div class="text-caption text-grey">{{ formatRelative(e.date_time) }}</div>
           </template>
-          <v-card variant="outlined" class="cursor-pointer" @click="$emit('select', e)">
+          <v-card variant="outlined" class="cursor-pointer"
+                  @click="$emit('select', e)"
+                  @dblclick="$emit('open', e)">
             <v-card-text class="py-3">
               <div class="d-flex align-center mb-1">
                 <span class="text-subtitle-2 mr-2">{{ humanType(e.type) }}</span>
@@ -41,7 +43,7 @@ import { ENCOUNTER_META } from '../constants/clinical.js'
 import { formatDate, formatRelative } from '../utils/format.js'
 
 const props = defineProps({ encounters: { type: Array, default: () => [] } })
-defineEmits(['select'])
+defineEmits(['select', 'open'])
 
 const sorted = computed(() =>
   (props.encounters || []).slice().sort((a, b) => new Date(a.date_time) - new Date(b.date_time)),
