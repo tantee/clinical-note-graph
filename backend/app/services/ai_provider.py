@@ -604,12 +604,23 @@ class OpenAICompatibleProvider(AIProvider):
         }
         if json_mode:
             payload["response_format"] = {"type": "json_object"}
+        # OpenRouter occasionally routes to upstreams that return empty or
+        # malformed JSON for json_object responses (observed: WandB on DeepSeek
+        # V3.1). Ask OpenRouter to skip them and fall back to a sibling.
+        if "openrouter.ai" in (self.base_url or ""):
+            payload["provider"] = {"ignore": ["WandB"], "allow_fallbacks": True}
 
         async with httpx.AsyncClient(timeout=120) as client:
             r = await client.post(f"{self.base_url}/chat/completions", json=payload, headers=self.headers)
             r.raise_for_status()
             data = r.json()
-            return data["choices"][0]["message"]["content"], data
+            content = (data.get("choices") or [{}])[0].get("message", {}).get("content")
+            if not content:
+                raise RuntimeError(
+                    f"Empty completion from {data.get('provider') or 'upstream'} for model={model}; "
+                    f"finish_reason={(data.get('choices') or [{}])[0].get('finish_reason')!r}"
+                )
+            return content, data
 
     async def extract(
         self,

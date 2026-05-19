@@ -172,6 +172,23 @@ def _persist_pre_extraction(req: EMRIngestRequest) -> tuple[dict[str, Any], dict
 
     with db_session() as s:
         _upsert_patient(s, patient)
+        # Retries of the same source document must reuse the encounter that
+        # was created on a previous attempt; otherwise every retry mints a new
+        # encounter and the document gets re-pointed, leaving orphans behind.
+        if not encounter.get("encounterId") and source.get("documentId"):
+            existing = s.execute(
+                text(
+                    "SELECT encounter_id FROM documents "
+                    "WHERE patient_id = :pid AND source_document_id = :sdid AND version = :ver"
+                ),
+                {
+                    "pid": patient["patientId"],
+                    "sdid": source.get("documentId"),
+                    "ver": source.get("version") or "1",
+                },
+            ).first()
+            if existing and existing[0]:
+                encounter["encounterId"] = existing[0]
         encounter_id = _upsert_encounter(s, encounter, patient["patientId"])
         encounter["encounterId"] = encounter_id
         document_id = _upsert_document(
