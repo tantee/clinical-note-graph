@@ -3,7 +3,8 @@ import { test, expect } from '@playwright/test'
 // Smoke test for the encounter summary flow.
 // Requires: AI_PROVIDER=mock in backend env (default in compose).
 test('encounter discharge summary renders with required sections', async ({ page }) => {
-  await page.goto('/patient/HN-DEMO-1')
+  // Router uses hash mode (see frontend/src/router.js — createWebHashHistory).
+  await page.goto('/#/patient/HN-DEMO-1')
   // Switch to the new Encounters tab — locator by tab label.
   await page.getByRole('tab', { name: /Encounters/i }).click()
   // First row in the data table → click "View"
