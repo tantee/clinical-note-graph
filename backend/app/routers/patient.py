@@ -11,7 +11,7 @@ from app.db.postgres import db_session
 from app.schemas.coding import CodingSuggestRequest, CodingSuggestResponse, SummaryRequest, SummaryResponse
 from app.services.coding import suggest_coding
 from app.services.embeddings import vector_search
-from app.services.graph_updater import fetch_patient_graph
+from app.services.graph_updater import fetch_patient_graph  # noqa: F401 (kept for any legacy callers)
 from app.services.markdown_generator import collect_backlinks, list_patient_files, read_note
 from app.services.patient_facts import gather_patient_facts
 from app.services.summary import make_summary
@@ -116,9 +116,41 @@ def list_patient_encounters(patient_id: str) -> list[dict[str, Any]]:
     ]
 
 
+_MAX_NODES_PRE_DEDUPE = 500
+
+
 @router.get("/patient/{patient_id}/graph")
-def get_graph(patient_id: str) -> dict[str, Any]:
-    return fetch_patient_graph(patient_id)
+def get_graph(
+    patient_id: str,
+    scope: str = Query("patient", pattern="^(patient|encounter|encounters)$"),
+    encounterId: list[str] = Query(default=[]),
+    dedupe: bool | None = Query(None),
+    includeEncounters: bool | None = Query(None, alias="includeEncounters"),
+    includeDocuments: bool = Query(False, alias="includeDocuments"),
+    reviewStatus: str = Query("hide_rejected", pattern="^(all|confirmed|hide_rejected)$"),
+) -> dict[str, Any]:
+    from app.services.graph_updater import fetch_graph
+    try:
+        graph = fetch_graph(
+            patient_id,
+            scope=scope,
+            encounter_ids=encounterId,
+            dedupe=dedupe,
+            include_encounters=includeEncounters,
+            include_documents=includeDocuments,
+            review_status=reviewStatus,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    if len(graph["nodes"]) > _MAX_NODES_PRE_DEDUPE:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "detail": "Graph too large; narrow the scope",
+                "nodeCount": len(graph["nodes"]),
+            },
+        )
+    return graph
 
 
 @router.get("/patient/{patient_id}/notes")
