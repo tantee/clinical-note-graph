@@ -182,12 +182,63 @@ Three ways to change them (any one works, all merge into the same effective sett
 
 The Debug page's *By model* table breaks down spend per actual model used, so you can A/B different choices and compare token + dollar costs side-by-side.
 
-### Model picks by task
+### Cost-effective preset stacks
 
-- **Best quality for `extract`** (the JSON-schema-following call): `anthropic/claude-3.5-sonnet` or `gpt-4o`. Strong clinical entity recognition, holds the schema reliably.
-- **Cheap-and-fast** for `summary` and as the overall default: `gpt-4o-mini`, `google/gemini-2.0-flash-001`, or `anthropic/claude-3.5-haiku`. Start with `mock` (offline, $0) to verify the pipeline before paying.
-- **Reasoning-heavy edge cases** (resolving contradictions across documents): `deepseek-reasoner` or `openai/o4-mini`. Slower, but better with chain-of-thought.
-- **Embeddings:** `openai/text-embedding-3-small` is the sensible default. The `mock` provider returns an empty vector, so when offline the pgvector pipeline cleanly skips inserts.
+Three drop-in presets ship at the repo root. Pick one based on the trade-offs below, copy its `AI_*` lines into `.env`, replace the API key, and `docker compose up` — or paste them into `PATCH /api/config` for a live swap.
+
+| Preset file | Stack | Realized cost / encounter¹ |
+|---|---|---|
+| `.env.option.deepseek` | DeepSeek V3.1 + GLM-4.5-Air + DeepSeek R1 (OSS Chinese) | ~$0.013 |
+| `.env.option.gemini` | Gemini 2.5 Flash + Flash-Lite + GPT-5-mini (Western, cost-only) | ~$0.011 |
+| `.env.option.hybrid` | Gemini Flash + GLM-Air + GPT-5-mini (recommended mix) | **~$0.0095** |
+
+¹ Assumes a typical encounter: extract ≈ 6K in / 1.5K out, summary ≈ 2K in / 0.7K out, coding ≈ 4K in / 0.8K answer + reasoning. OpenRouter list rates, January 2026.
+
+#### Headline price comparison (per 1M tokens, in / out)
+
+| Slot | DeepSeek/GLM | Gemini/GPT-5 |
+|---|---|---|
+| extract | `deepseek-chat-v3.1` — **$0.27 / $1.10** | `gemini-2.5-flash` — $0.30 / $2.50 |
+| summary | `glm-4.5-air` — ~$0.20 / $1.10 | `gemini-2.5-flash-lite` — **$0.10 / $0.40** |
+| coding | `deepseek-r1-0528` — $0.55 / $2.19 | `gpt-5-mini` — **$0.25 / $2.00** |
+| embeddings | `text-embedding-3-small` — $0.02 (both) | same |
+
+Headline rates favour DeepSeek, but R1's reasoning-token bill (often 2–5× the answer length, charged as output) flips the realized total. Bounded reasoning on `gpt-5-mini` is why the Gemini and Hybrid stacks finish cheaper end-to-end.
+
+#### Pros / cons
+
+**DeepSeek + GLM (`.env.option.deepseek`)**
+- ✅ Lowest input-token price across the board — wins big on long-note / extract-heavy workloads.
+- ✅ Open weights — can self-host the same models later for data residency / on-prem / air-gapped deployments.
+- ✅ R1's chain-of-thought is genuinely strong on multi-step medical reasoning (conflicting findings, ICD specificity).
+- ❌ R1 burns reasoning tokens — coding spend is unpredictable.
+- ❌ Latency: R1 can take 10–30s per coding call. Fine inside the async ingest pipeline, painful for a synchronous "suggest codes now" UI.
+- ❌ Weaker Western clinical priors than GPT/Gemini; expect worse ICD specificity on rare conditions.
+- ❌ Data residency: OpenRouter sometimes routes DeepSeek/Z.AI through Chinese-hosted upstreams — pin providers or move off OpenRouter if you process real PHI.
+
+**Gemini + GPT-5-mini (`.env.option.gemini`)**
+- ✅ Lower realized cost on coding (gpt-5-mini's reasoning is bounded vs R1).
+- ✅ Fast: Gemini Flash and GPT-5-mini both respond in 1–4s.
+- ✅ Stronger medical priors — richer clinical training data.
+- ✅ Gemini structured-output is the gold standard for strict JSON — fewer retry-on-malformed-JSON cycles.
+- ✅ US/EU-hosted upstreams; predictable for compliance reviews.
+- ❌ Closed weights — no self-host escape hatch.
+- ❌ Vendor lock to two big-lab APIs — slightly more concentrated risk.
+
+**Hybrid (`.env.option.hybrid`) — recommended**
+- ✅ Gemini Flash keeps extract reliability; GLM-Air keeps summary dirt cheap with better prose than Flash-Lite; gpt-5-mini handles coding without R1's latency tax.
+- ✅ Cheapest realized cost of the three documented presets.
+- ❌ Three different upstream providers — more billing dashboards if you ever leave OpenRouter.
+
+#### When to pick which
+
+- High volume, short notes, no PHI concerns → **deepseek**. Low input prices dominate, R1's reasoning amortizes over simple cases.
+- Complex cases, accuracy-sensitive coding, future PHI workload → **gemini**. Bounded reasoning, better priors, cleaner compliance.
+- Best balance of cost, accuracy, and latency → **hybrid**.
+
+After a few real ingests, check the Debug → *By model* table to see actual spend by model — if `coding` dominates, swap `AI_MODEL_CODING` for the same model you use on `extract` (typically a 30–40% total-cost cut at marginal quality impact on routine cases).
+
+> ⚠️ Verify exact model slugs at <https://openrouter.ai/models> before applying — OpenRouter occasionally renames variants (e.g. dated suffixes like `-0528`). The slugs above match what was current at preset authoring time (2026-05).
 
 ---
 
