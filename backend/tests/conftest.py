@@ -547,12 +547,30 @@ def fake_store(monkeypatch):
 
 @pytest.fixture()
 def stub_neo4j(monkeypatch):
-    """Stub all Neo4j calls so the ingest pipeline runs without a real database."""
-    calls: list[tuple[str, dict]] = []
+    """Stub all Neo4j calls so the ingest pipeline runs without a real database.
+
+    The returned `calls` list captures every call. For tests that need
+    fetch_graph to return specific data, call `calls.prime([row_dict])` to
+    set what the next `run_cypher` call returns. The primer is cleared after
+    each call so each test can seed fresh state."""
+
+    class _CallsList(list):
+        """list subclass that also carries a prime() helper."""
+        pass
+
+    calls = _CallsList()
+    primed_results: list[list[dict]] = []  # FIFO of next-call results
 
     def fake_run_cypher(q, params=None):
         calls.append((q.strip(), params or {}))
+        if primed_results:
+            return primed_results.pop(0)
         return []
+
+    def prime(rows: list[dict]) -> None:
+        primed_results.append(rows)
+
+    calls.prime = prime  # type: ignore[attr-defined]
 
     class FakeSess:
         def __enter__(self): return self

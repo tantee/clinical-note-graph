@@ -385,7 +385,12 @@ def _materialize_rows(row: dict[str, Any], *, include_encounters: bool,
         if not e:
             continue
         eid_str = (e.get("encounterId") or "")
-        enc_node_id = add("Encounter", e, "encounterId")
+        if include_encounters:
+            enc_node_id = add("Encounter", e, "encounterId")
+        else:
+            # Build enc_ids for fact-attachment lookup without emitting the node.
+            clean = _jsonable(e)
+            enc_node_id = f"Encounter:{clean.get('encounterId')}"
         if enc_node_id is None:
             continue
         enc_ids[eid_str] = enc_node_id
