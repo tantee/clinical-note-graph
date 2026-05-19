@@ -186,9 +186,9 @@ def _persist_pre_extraction(req: EMRIngestRequest) -> tuple[dict[str, Any], dict
                     "sdid": source.get("documentId"),
                     "ver": source.get("version") or "1",
                 },
-            ).first()
-            if existing and existing[0]:
-                encounter["encounterId"] = existing[0]
+            ).mappings().first()
+            if existing and existing["encounter_id"]:
+                encounter["encounterId"] = existing["encounter_id"]
         encounter_id = _upsert_encounter(s, encounter, patient["patientId"])
         encounter["encounterId"] = encounter_id
         document_id = _upsert_document(

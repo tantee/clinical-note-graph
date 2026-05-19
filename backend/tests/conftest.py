@@ -358,6 +358,8 @@ class FakeStore:
             pid = params.get("pid")
             did = params.get("did")
             eid = params.get("eid")
+            sdid = params.get("sdid")
+            ver = params.get("ver")
             if eid is not None and pid is None:
                 # encounter-scoped query: WHERE encounter_id = :eid
                 rows = [d for d in self.documents.values() if d.get("encounter_id") == eid]
@@ -367,6 +369,10 @@ class FakeStore:
                     rows = [d for d in rows if d["document_id"] == did]
                 if eid is not None:
                     rows = [d for d in rows if d["encounter_id"] == eid]
+                if sdid is not None:
+                    rows = [d for d in rows if d.get("source_document_id") == sdid]
+                if ver is not None:
+                    rows = [d for d in rows if d.get("version") == ver]
             return FakeResult(rows)
         # Aggregations on ai_outputs — summary + per-model + per-day.
         # These must fire BEFORE the generic `from ai_outputs` branch below.
