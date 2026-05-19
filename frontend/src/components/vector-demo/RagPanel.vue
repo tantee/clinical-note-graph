@@ -11,7 +11,8 @@
                           density="compact" />
 
           <div class="d-flex align-center mt-2 mb-2">
-            <v-btn-toggle v-model="mode" mandatory density="compact" color="primary" variant="outlined">
+            <v-btn-toggle v-model="mode" mandatory density="compact" color="primary"
+                          variant="outlined" divided class="ga-2">
               <v-btn value="one_shot" prepend-icon="mdi-message-text">One-shot</v-btn>
               <v-btn value="chat" prepend-icon="mdi-forum-outline">Chat</v-btn>
             </v-btn-toggle>

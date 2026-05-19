@@ -1,7 +1,10 @@
 import axios from 'axios'
 import { useUiStore } from '../stores/ui.js'
 
-const baseURL = import.meta.env.VITE_API_BASE || 'http://localhost:8000'
+// When VITE_API_BASE is set (typically a full URL for prod), use it.
+// Empty / unset → use relative '/api/...' so the page's origin (the Caddy proxy)
+// resolves the API host. Avoids cross-origin / CORS preflight on dev :8081.
+const baseURL = import.meta.env.VITE_API_BASE || ''
 
 export const api = axios.create({ baseURL, timeout: 120000 })
 

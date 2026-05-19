@@ -15,7 +15,11 @@
         </v-chip>
       </div>
       <v-spacer />
-      <PatientSearchInput class="d-none d-md-inline-flex mr-3" />
+      <!-- v-menu (root element of PatientSearchInput) doesn't have a DOM node
+           for the margin to land on, so wrap in a div with spacing classes. -->
+      <div class="d-none d-md-inline-flex mr-4">
+        <PatientSearchInput />
+      </div>
       <v-btn variant="text" to="/patients" prepend-icon="mdi-account-multiple-outline">Patients</v-btn>
       <v-btn variant="text" to="/ingest" prepend-icon="mdi-cloud-upload-outline">Ingest</v-btn>
       <v-btn variant="text" to="/config" prepend-icon="mdi-cog-outline">Config</v-btn>
