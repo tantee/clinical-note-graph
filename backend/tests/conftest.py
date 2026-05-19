@@ -93,6 +93,7 @@ class FakeStore:
         }
         self.embeddings: list[dict] = []
         self.pricing: dict[str, dict] = {}
+        self.patient_summaries: list[dict] = []
 
     def execute(self, sql: str, params: dict[str, Any]) -> FakeResult:
         s = sql.lower()
@@ -138,6 +139,39 @@ class FakeStore:
                     "extra": json.loads(p["extra"]) if isinstance(p.get("extra"), str) else (p.get("extra") or {}),
                 })
             return FakeResult([])
+        if s.startswith("insert into patient_summaries"):
+            created_at = datetime(2026, 5, 19, 0, 0, 0, tzinfo=timezone.utc)
+            row = {
+                "id": f"ps-{len(self.patient_summaries)}",
+                "patient_id": params.get("pid"),
+                "kind": params.get("kind") if params.get("kind") is not None else (
+                    "summary" if params.get("md") is not None else "coding"
+                ),
+                "encounter_id": params.get("eid"),
+                "type": params.get("tp"),
+                "model": params.get("mdl"),
+                "markdown": params.get("md"),
+                "payload": json.loads(params["p"]) if isinstance(params.get("p"), str) else params.get("p"),
+                "evidence": json.loads(params["ev"]) if isinstance(params.get("ev"), str) else params.get("ev"),
+                "cost_usd": params.get("cost"),
+                "latency_ms": params.get("lat"),
+                "vault_path": params.get("vp"),
+                "created_at": created_at,
+            }
+            self.patient_summaries.append(row)
+            return FakeResult([{"id": row["id"], "created_at": created_at}])
+        if "from patient_summaries" in s and "from encounters" not in s:
+            pid = params.get("pid")
+            eid = params.get("eid")
+            kind = "coding" if "kind = 'coding'" in s else "summary"
+            rows = [
+                r for r in self.patient_summaries
+                if r["patient_id"] == pid
+                and r["kind"] == kind
+                and (eid is None or r.get("encounter_id") == eid)
+            ]
+            rows.sort(key=lambda r: r["created_at"], reverse=True)
+            return FakeResult(rows[:1])
         if s.startswith("insert into ai_outputs"):
             self.ai_outputs.append({
                 "id": f"ai-{len(self.ai_outputs)}",
@@ -278,6 +312,9 @@ class FakeStore:
                 rows = [p for p in self.patients.values() if q in (p.get("name") or "").lower() or q in p["patient_id"].lower()]
                 return FakeResult(rows)
             return FakeResult(list(self.patients.values()))
+        if "from encounters" in s and "where encounter_id" in s:
+            row = self.encounters.get(params.get("eid"))
+            return FakeResult([row] if row else [])
         if " from encounters " in s or " from encounters\n" in s:
             pid = params.get("pid")
             base = [e for e in self.encounters.values() if e["patient_id"] == pid]
@@ -285,21 +322,57 @@ class FakeStore:
                 for e in base:
                     e["document_count"] = sum(1 for d in self.documents.values() if d["encounter_id"] == e["encounter_id"])
                     e["fact_count"] = sum(1 for f in self.facts if f.get("encounter_id") == e["encounter_id"])
+            if "exists(select 1 from patient_summaries" in s:
+                for e in base:
+                    e["has_summary"] = any(
+                        r["kind"] == "summary" and r.get("encounter_id") == e["encounter_id"]
+                        for r in self.patient_summaries
+                    )
+                    e["has_coding"] = any(
+                        r["kind"] == "coding" and r.get("encounter_id") == e["encounter_id"]
+                        for r in self.patient_summaries
+                    )
+                    e["doc_count"] = sum(1 for d in self.documents.values() if d["encounter_id"] == e["encounter_id"])
             return FakeResult(base)
         if " from facts " in s or "from facts\n" in s:
             pid = params.get("pid")
             did = params.get("did")
-            rows = [f for f in self.facts if f.get("patient_id") == pid and (did is None or f.get("document_id") == did)]
+            eid = params.get("eid")
+            if eid is not None and pid is None:
+                # encounter-scoped query: WHERE encounter_id = :eid AND review_status <> 'rejected'
+                rows = [f for f in self.facts if f.get("encounter_id") == eid and f.get("review_status") != "rejected"]
+            elif eid is not None and pid is not None:
+                # background query: WHERE patient_id = :pid AND encounter_id <> :eid AND review_status <> 'rejected'
+                bg_types = ("condition", "medication", "allergy")
+                rows = [
+                    f for f in self.facts
+                    if f.get("patient_id") == pid
+                    and (f.get("encounter_id") is None or f.get("encounter_id") != eid)
+                    and f.get("review_status") != "rejected"
+                    and f.get("type") in bg_types
+                ]
+            else:
+                rows = [f for f in self.facts if f.get("patient_id") == pid and (did is None or f.get("document_id") == did)]
             return FakeResult(rows)
         if " from documents " in s or "from documents\n" in s:
             pid = params.get("pid")
             did = params.get("did")
             eid = params.get("eid")
-            rows = [d for d in self.documents.values() if d["patient_id"] == pid]
-            if did is not None:
-                rows = [d for d in rows if d["document_id"] == did]
-            if eid is not None:
-                rows = [d for d in rows if d["encounter_id"] == eid]
+            sdid = params.get("sdid")
+            ver = params.get("ver")
+            if eid is not None and pid is None:
+                # encounter-scoped query: WHERE encounter_id = :eid
+                rows = [d for d in self.documents.values() if d.get("encounter_id") == eid]
+            else:
+                rows = [d for d in self.documents.values() if d["patient_id"] == pid]
+                if did is not None:
+                    rows = [d for d in rows if d["document_id"] == did]
+                if eid is not None:
+                    rows = [d for d in rows if d["encounter_id"] == eid]
+                if sdid is not None:
+                    rows = [d for d in rows if d.get("source_document_id") == sdid]
+                if ver is not None:
+                    rows = [d for d in rows if d.get("version") == ver]
             return FakeResult(rows)
         # Aggregations on ai_outputs — summary + per-model + per-day.
         # These must fire BEFORE the generic `from ai_outputs` branch below.
@@ -453,6 +526,8 @@ def fake_store(monkeypatch):
     monkeypatch.setattr(pricing_mod, "db_session", _db_session)
     import app.services.ai_provider as ai_provider_mod
     monkeypatch.setattr(ai_provider_mod, "db_session", _db_session)
+    import app.services.summary_store as summary_store_mod
+    monkeypatch.setattr(summary_store_mod, "db_session", _db_session)
     import app.services.queue as queue_mod
     monkeypatch.setattr(queue_mod, "db_session", _db_session)
     import app.services.debug_queries as debug_queries_mod
@@ -461,6 +536,8 @@ def fake_store(monkeypatch):
     monkeypatch.setattr(cfg_router, "db_session", _db_session)
     import app.routers.patient as p_router
     monkeypatch.setattr(p_router, "db_session", _db_session)
+    import app.routers.encounter as encounter_router
+    monkeypatch.setattr(encounter_router, "db_session", _db_session)
     import app.routers.jobs as jobs_router
     monkeypatch.setattr(jobs_router, "db_session", _db_session)
     import app.db.helpers as h_mod
@@ -522,6 +599,10 @@ def app_client(fake_store, stub_neo4j, isolated_vault, monkeypatch):
     # Disable workers in the TestClient lifespan so they don't race with
     # tests that mutate `fake_store.jobs` directly.
     monkeypatch.setenv("QUEUE_WORKERS", "0")
+    # Always use the mock AI provider in unit/integration tests so no real API
+    # calls are made (and evidence always comes back as an empty list, which is
+    # valid for the CodingSuggestResponse schema).
+    monkeypatch.setenv("AI_PROVIDER", "mock")
     from app.config import get_settings
     get_settings.cache_clear()
 

@@ -80,6 +80,42 @@ def get_encounter_documents(patient_id: str, encounter_id: str) -> dict[str, Any
     return {"patientId": patient_id, "encounterId": encounter_id, "documents": [dict(r) for r in rows]}
 
 
+@router.get("/patient/{patient_id}/encounters")
+def list_patient_encounters(patient_id: str) -> list[dict[str, Any]]:
+    """List encounters for a patient with doc count + AI-output flags.
+    Drives the new Encounters tab and the Patients-list expand row."""
+    with db_session() as s:
+        rows = s.execute(
+            text(
+                """
+                SELECT e.encounter_id, e.type, e.date_time, e.department, e.provider,
+                       (SELECT COUNT(*) FROM documents d WHERE d.encounter_id = e.encounter_id) AS doc_count,
+                       EXISTS(SELECT 1 FROM patient_summaries ps
+                              WHERE ps.encounter_id = e.encounter_id AND ps.kind = 'summary') AS has_summary,
+                       EXISTS(SELECT 1 FROM patient_summaries ps
+                              WHERE ps.encounter_id = e.encounter_id AND ps.kind = 'coding') AS has_coding
+                FROM encounters e
+                WHERE e.patient_id = :pid
+                ORDER BY e.date_time DESC
+                """
+            ),
+            {"pid": patient_id},
+        ).mappings().all()
+    return [
+        {
+            "encounterId": r["encounter_id"],
+            "type": r["type"],
+            "dateTime": str(r["date_time"]) if r["date_time"] else None,
+            "department": r["department"],
+            "provider": r["provider"],
+            "docCount": int(r["doc_count"] or 0),
+            "hasSummary": bool(r["has_summary"]),
+            "hasCoding": bool(r["has_coding"]),
+        }
+        for r in rows
+    ]
+
+
 @router.get("/patient/{patient_id}/graph")
 def get_graph(patient_id: str) -> dict[str, Any]:
     return fetch_patient_graph(patient_id)

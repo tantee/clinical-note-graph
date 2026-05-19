@@ -61,6 +61,16 @@ export const suggestCoding = (id, body) =>
   api.post(`/api/patient/${encodeURIComponent(id)}/coding/suggest`, body).then(data)
 export const getLatestCoding = (id) =>
   api.get(`/api/patient/${encodeURIComponent(id)}/coding/latest`).then(data)
+export const listEncounters = (id) =>
+  api.get(`/api/patient/${encodeURIComponent(id)}/encounters`).then(data)
+export const summarizeEncounter = (pid, eid, body) =>
+  api.post(`/api/patient/${encodeURIComponent(pid)}/encounter/${encodeURIComponent(eid)}/summary`, body).then(data)
+export const getLatestEncounterSummary = (pid, eid) =>
+  api.get(`/api/patient/${encodeURIComponent(pid)}/encounter/${encodeURIComponent(eid)}/summary/latest`).then(data)
+export const suggestEncounterCoding = (pid, eid, body) =>
+  api.post(`/api/patient/${encodeURIComponent(pid)}/encounter/${encodeURIComponent(eid)}/coding/suggest`, body).then(data)
+export const getLatestEncounterCoding = (pid, eid) =>
+  api.get(`/api/patient/${encodeURIComponent(pid)}/encounter/${encodeURIComponent(eid)}/coding/latest`).then(data)
 export const reviewFact = (factId, status) =>
   api.patch(`/api/facts/${factId}/review`, null, { params: { status } }).then(data)
 export const exportPatient = (body) => api.post('/api/export', body).then(data)

@@ -80,7 +80,8 @@ def test_openai_provider_captures_usage(monkeypatch, fake_store):
 
     monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
 
-    settings = Settings(AI_PROVIDER="openai", AI_BASE_URL="https://test/v1", AI_API_KEY="k", AI_MODEL="gpt-4o-mini")
+    settings = Settings(AI_PROVIDER="openai", AI_BASE_URL="https://test/v1", AI_API_KEY="k", AI_MODEL="gpt-4o-mini",
+                        AI_MODEL_EXTRACT="", AI_MODEL_SUMMARY="", AI_MODEL_CODING="")
     p = OpenAICompatibleProvider(settings)
     out, rec = asyncio.run(p.extract(
         patient_id="HN1", encounter_type="admission", encounter_dt="2026-05-15T10:00:00+07:00",

@@ -19,6 +19,7 @@ from app.prompts.templates import (
     EXTRACTION_SYSTEM,
     EXTRACTION_USER,
     SUMMARY_SYSTEM,
+    summary_system_for,
 )
 from app.schemas.extraction import ClinicalExtractionResult
 from app.services.pricing import compute_cost, load_rates
@@ -728,7 +729,7 @@ class OpenAICompatibleProvider(AIProvider):
         job_id: str | None = None,
         patient_id: str | None = None,
     ) -> tuple[str, AICallRecord]:
-        system = SUMMARY_SYSTEM.format(summary_type=summary_type)
+        system = summary_system_for(summary_type)
         user = "Structured facts:\n" + json.dumps(patient_facts, default=str)
         model = self._model_for("summary")
         t0 = time.perf_counter()

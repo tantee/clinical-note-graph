@@ -36,7 +36,7 @@ class DateRange(BaseModel):
 
 
 class SummaryRequest(BaseModel):
-    type: Literal["brief", "detailed", "discharge", "problem_oriented", "timeline", "coding_support"] = "brief"
+    type: str | None = None
     dateRange: DateRange | None = None
     includeEvidence: bool = True
 

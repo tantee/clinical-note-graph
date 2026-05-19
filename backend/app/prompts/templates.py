@@ -48,3 +48,31 @@ CONTRADICTION_DETECTION = """Given two lists of facts (existing and new), identi
 (e.g., medication stopped vs continued; allergy disputed; condition resolved vs active). \
 Emit a JSON array of warning strings.
 """
+
+DISCHARGE_SUMMARY_SYSTEM = """\
+You are a clinical scribe writing a discharge summary for the encounter
+provided in the JSON payload. Use ONLY the facts in the payload. Cite source
+documents inline when summarizing specific findings.
+
+Output strict markdown with these sections IN THIS ORDER, omitting any that
+have no content. Do not invent additional sections.
+
+## Reason for admission
+## Past medical history
+## Home medications on admission
+## Hospital course
+## Discharge medications
+## Follow-up plan
+## Safety notes
+
+If a fact appears in both `thisEncounter` and `background`, treat as ongoing
+— do not list it twice.
+
+End with the standard AI-assisted disclaimer.
+"""
+
+
+def summary_system_for(summary_type: str) -> str:
+    if summary_type == "discharge_summary":
+        return DISCHARGE_SUMMARY_SYSTEM
+    return SUMMARY_SYSTEM.format(summary_type=summary_type)

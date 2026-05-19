@@ -28,6 +28,7 @@
     <v-tabs v-model="tab" color="primary" density="comfortable" show-arrows>
       <v-tab value="overview" prepend-icon="mdi-view-dashboard-outline">Overview</v-tab>
       <v-tab value="timeline" prepend-icon="mdi-timeline-text-outline">Timeline</v-tab>
+      <v-tab value="encounters" prepend-icon="mdi-table-account">Encounters</v-tab>
       <v-tab value="notes" prepend-icon="mdi-file-document-multiple-outline">Notes</v-tab>
       <v-tab value="graph" prepend-icon="mdi-graph-outline">Graph</v-tab>
       <v-tab value="raw" prepend-icon="mdi-text-box-search-outline">EMR vs facts</v-tab>
@@ -70,54 +71,45 @@
           </v-col>
         </v-row>
 
-        <v-card v-if="summary" ref="summaryCard" class="mt-4">
-          <SectionHeader title="AI summary" icon="mdi-text-box-outline">
-            <span class="text-caption text-grey-darken-1 ml-2">
-              ({{ summary.type }}{{ summary.createdAt ? ' · ' + new Date(summary.createdAt).toLocaleString() : '' }})
-            </span>
-            <template #actions>
-              <v-chip v-if="summary.vaultPath" size="x-small" variant="tonal" prepend-icon="mdi-folder-outline" class="mr-1">
-                {{ summary.vaultPath }}
-              </v-chip>
-              <v-chip size="x-small" color="warning" variant="tonal">AI-assisted</v-chip>
-            </template>
-          </SectionHeader>
-          <v-divider />
-          <v-card-text>
-            <div class="cng-markdown" v-html="renderedSummary" />
-          </v-card-text>
-        </v-card>
-
-        <v-card v-if="codingResp" ref="codingCard" class="mt-4">
-          <SectionHeader title="Coding suggestion" icon="mdi-medical-bag-outline">
-            <template #actions><v-chip size="x-small" color="warning" variant="tonal">AI-assisted</v-chip></template>
-          </SectionHeader>
-          <v-divider />
-          <v-card-text>
-            <div v-if="codingResp.primaryDiagnosis" class="mb-2">
-              <span class="text-body-2 text-grey-darken-1">Primary</span><br />
-              <strong>{{ codingResp.primaryDiagnosis.condition }}</strong>
-              <v-chip v-if="codingResp.primaryDiagnosis.icd10" size="x-small" class="ml-2">ICD-10 {{ codingResp.primaryDiagnosis.icd10 }}</v-chip>
-              <v-chip v-if="codingResp.primaryDiagnosis.snomed" size="x-small" class="ml-1">SNOMED {{ codingResp.primaryDiagnosis.snomed }}</v-chip>
-            </div>
-            <div v-if="codingResp.secondaryDiagnoses?.length">
-              <div class="text-body-2 text-grey-darken-1 mb-1 mt-3">Secondary</div>
-              <div v-for="(d, i) in codingResp.secondaryDiagnoses" :key="i" class="mb-1">
-                {{ d.condition }}
-                <v-chip v-if="d.icd10" size="x-small" class="ml-1">ICD-10 {{ d.icd10 }}</v-chip>
-                <v-chip v-if="d.snomed" size="x-small" class="ml-1">SNOMED {{ d.snomed }}</v-chip>
-              </div>
-            </div>
-            <v-alert v-if="codingResp.disclaimer" type="warning" variant="tonal" density="compact" class="mt-3">
-              {{ codingResp.disclaimer }}
-            </v-alert>
-          </v-card-text>
-        </v-card>
+        <SummaryCard ref="summaryCard" :value="summary" />
+        <CodingCard ref="codingCard" :value="codingResp" />
       </v-window-item>
 
       <!-- Timeline -->
       <v-window-item value="timeline">
-        <Timeline :encounters="timeline.encounters || []" @select="selectEncounter" />
+        <Timeline :encounters="timeline.encounters || []"
+                  @select="selectEncounter"
+                  @open="openEncounter" />
+      </v-window-item>
+
+      <!-- Encounters -->
+      <v-window-item value="encounters">
+        <v-data-table
+          :headers="encounterHeaders"
+          :items="encounters"
+          items-per-page="25"
+          density="comfortable"
+          class="elevation-0"
+        >
+          <template #item.dateTime="{ item }">
+            {{ item.dateTime ? new Date(item.dateTime).toLocaleString() : '' }}
+          </template>
+          <template #item.hasSummary="{ item }">
+            <v-icon v-if="item.hasSummary" color="success" size="small">mdi-check</v-icon>
+            <span v-else class="text-grey">—</span>
+          </template>
+          <template #item.hasCoding="{ item }">
+            <v-icon v-if="item.hasCoding" color="success" size="small">mdi-check</v-icon>
+            <span v-else class="text-grey">—</span>
+          </template>
+          <template #item.actions="{ item }">
+            <v-btn size="x-small" variant="text" :to="{ name: 'encounter', params: { id, eid: item.encounterId } }">View</v-btn>
+            <v-btn size="x-small" variant="text"
+                   :to="{ name: 'encounter', params: { id, eid: item.encounterId }, query: { action: 'summary' } }">
+              Summarize
+            </v-btn>
+          </template>
+        </v-data-table>
       </v-window-item>
 
       <!-- Notes -->
@@ -267,12 +259,12 @@
 
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
-import { marked } from 'marked'
+import { useRouter } from 'vue-router'
 import { FACT_TYPE_META } from '../constants/clinical.js'
 import {
   getPatient, getTimeline, getGraph, getNotes, getNote,
   getEncounterDocuments, getDocument, summarize, suggestCoding, reviewFact,
-  getLatestSummary, getLatestCoding,
+  getLatestSummary, getLatestCoding, listEncounters,
 } from '../api/client.js'
 import { useUiStore } from '../stores/ui.js'
 import MarkdownViewer from '../components/MarkdownViewer.vue'
@@ -281,9 +273,12 @@ import Timeline from '../components/Timeline.vue'
 import SectionHeader from '../components/SectionHeader.vue'
 import EmptyState from '../components/EmptyState.vue'
 import FactCard from '../components/FactCard.vue'
+import SummaryCard from '../components/SummaryCard.vue'
+import CodingCard from '../components/CodingCard.vue'
 
 const props = defineProps({ id: { type: String, required: true } })
 const ui = useUiStore()
+const router = useRouter()
 
 const tab = ref('overview')
 const loading = ref(true)
@@ -294,6 +289,7 @@ const notes = ref([])
 const selectedNote = ref(null)
 const encounterDocuments = ref([])
 const selectedDocument = ref(null)
+const encounters = ref([])
 const summary = ref(null)
 const codingResp = ref(null)
 const summaryCard = ref(null)
@@ -301,19 +297,31 @@ const codingCard = ref(null)
 const busy = reactive({ summary: false, coding: false })
 let activeAbort = null
 
+const encounterHeaders = [
+  { title: 'Date', key: 'dateTime', sortable: true },
+  { title: 'Type', key: 'type', sortable: true },
+  { title: 'Dept', key: 'department', sortable: true },
+  { title: 'Provider', key: 'provider', sortable: true },
+  { title: 'Docs', key: 'docCount', sortable: true, align: 'end' },
+  { title: 'Summary', key: 'hasSummary', sortable: true, align: 'center' },
+  { title: 'Coding', key: 'hasCoding', sortable: true, align: 'center' },
+  { title: '', key: 'actions', sortable: false, align: 'end' },
+]
+
 async function load() {
   if (activeAbort) activeAbort.abort()
   const ctl = new AbortController()
   activeAbort = ctl
   loading.value = true
   try {
-    const [p, t, g, n, sum, cod] = await Promise.all([
+    const [p, t, g, n, sum, cod, encs] = await Promise.all([
       getPatient(props.id, ctl.signal),
       getTimeline(props.id, ctl.signal),
       getGraph(props.id, ctl.signal),
       getNotes(props.id, ctl.signal),
       getLatestSummary(props.id).catch(() => null),
       getLatestCoding(props.id).catch(() => null),
+      listEncounters(props.id).catch(() => []),
     ])
     patient.value = p
     timeline.value = t
@@ -321,6 +329,7 @@ async function load() {
     notes.value = n.files
     summary.value = sum || null
     codingResp.value = cod?.payload || null
+    encounters.value = encs
     if (notes.value.length) {
       const idx = notes.value.find((f) => f.path.endsWith('index.md')) || notes.value[0]
       openNote(idx.path)
@@ -357,6 +366,10 @@ async function selectEncounter(e) {
   } catch (err) {
     /* error already toast-ed by interceptor */
   }
+}
+
+function openEncounter(e) {
+  router.push({ name: 'encounter', params: { id: props.id, eid: e.encounter_id } })
 }
 
 async function openDocument(documentId) {
@@ -400,8 +413,6 @@ async function onReviewChange(fact, status) {
     fact.review_status = prev
   }
 }
-
-const renderedSummary = computed(() => marked.parse(summary.value?.markdown || ''))
 
 const FOLDER_ORDER = ['visits', 'summaries', 'problems', 'medications', 'observations', 'labs', 'plans', 'allergies', 'procedures', 'sources']
 const FOLDER_LABELS = {
