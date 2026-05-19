@@ -16,6 +16,7 @@ from app.middleware import ApiKeyMiddleware, RequestContextMiddleware
 from app.routers import config as config_router
 from app.routers import debug as debug_router
 from app.routers import emr, export, jobs, patient
+from app.routers import encounter as encounter_router
 from app.services.graph_updater import ensure_constraints
 from app.services.queue import start_workers, stop_workers
 
@@ -101,6 +102,7 @@ def create_app() -> FastAPI:
 
     app.include_router(emr.router)
     app.include_router(patient.router)
+    app.include_router(encounter_router.router)
     app.include_router(config_router.router)
     app.include_router(export.router)
     app.include_router(jobs.router)

@@ -140,6 +140,7 @@ class FakeStore:
                 })
             return FakeResult([])
         if s.startswith("insert into patient_summaries"):
+            created_at = datetime(2026, 5, 19, 0, 0, 0, tzinfo=timezone.utc)
             row = {
                 "id": f"ps-{len(self.patient_summaries)}",
                 "patient_id": params.get("pid"),
@@ -155,11 +156,11 @@ class FakeStore:
                 "cost_usd": params.get("cost"),
                 "latency_ms": params.get("lat"),
                 "vault_path": params.get("vp"),
-                "created_at": "2026-05-19T00:00:00+00:00",
+                "created_at": created_at,
             }
             self.patient_summaries.append(row)
-            return FakeResult([{"id": row["id"], "created_at": row["created_at"]}])
-        if "from patient_summaries" in s:
+            return FakeResult([{"id": row["id"], "created_at": created_at}])
+        if "from patient_summaries" in s and "from encounters" not in s:
             pid = params.get("pid")
             eid = params.get("eid")
             kind = "coding" if "kind = 'coding'" in s else "summary"
@@ -529,6 +530,8 @@ def fake_store(monkeypatch):
     monkeypatch.setattr(cfg_router, "db_session", _db_session)
     import app.routers.patient as p_router
     monkeypatch.setattr(p_router, "db_session", _db_session)
+    import app.routers.encounter as encounter_router
+    monkeypatch.setattr(encounter_router, "db_session", _db_session)
     import app.routers.jobs as jobs_router
     monkeypatch.setattr(jobs_router, "db_session", _db_session)
     import app.db.helpers as h_mod
@@ -590,6 +593,10 @@ def app_client(fake_store, stub_neo4j, isolated_vault, monkeypatch):
     # Disable workers in the TestClient lifespan so they don't race with
     # tests that mutate `fake_store.jobs` directly.
     monkeypatch.setenv("QUEUE_WORKERS", "0")
+    # Always use the mock AI provider in unit/integration tests so no real API
+    # calls are made (and evidence always comes back as an empty list, which is
+    # valid for the CodingSuggestResponse schema).
+    monkeypatch.setenv("AI_PROVIDER", "mock")
     from app.config import get_settings
     get_settings.cache_clear()
 
