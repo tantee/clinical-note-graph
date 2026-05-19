@@ -35,8 +35,14 @@ export const getPatient = (id, signal) =>
   api.get(`/api/patient/${encodeURIComponent(id)}`, { signal }).then(data)
 export const getTimeline = (id, signal) =>
   api.get(`/api/patient/${encodeURIComponent(id)}/timeline`, { signal }).then(data)
-export const getGraph = (id, signal) =>
-  api.get(`/api/patient/${encodeURIComponent(id)}/graph`, { signal }).then(data)
+export const getGraph = (id, options = {}) => {
+  const { signal, ...rest } = options
+  // Filter out undefined values so they don't appear as `key=undefined` in the URL.
+  const params = Object.fromEntries(
+    Object.entries(rest).filter(([, v]) => v !== undefined && v !== null && v !== ''),
+  )
+  return api.get(`/api/patient/${encodeURIComponent(id)}/graph`, { params, signal }).then(data)
+}
 export const getNotes = (id, signal) =>
   api.get(`/api/patient/${encodeURIComponent(id)}/notes`, { signal }).then(data)
 export const getNote = (id, path, signal) =>

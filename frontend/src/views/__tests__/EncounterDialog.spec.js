@@ -19,6 +19,13 @@ import * as api from '../../api/client.js'
 // Vuetify stubs — the vite config drops the vuetify plugin in test mode,
 // so we stub v-* components the same way the existing spec files do.
 const stubs = {
+  'v-dialog': { template: '<div class="v-dialog"><slot/></div>', props: ['modelValue', 'fullscreen', 'transition', 'scrollable'] },
+  'v-toolbar': { template: '<div class="v-toolbar"><slot/></div>', props: ['color', 'density'] },
+  'v-toolbar-title': { template: '<div class="v-toolbar-title"><slot/></div>' },
+  'v-tabs': { template: '<div class="v-tabs"><slot/></div>', props: ['modelValue', 'color', 'density'] },
+  'v-tab': { template: '<div class="v-tab"><slot/></div>', props: ['value', 'prepend-icon'] },
+  'v-window': { template: '<div class="v-window"><slot/></div>', props: ['modelValue'] },
+  'v-window-item': { template: '<div class="v-window-item"><slot/></div>', props: ['value'] },
   'v-progress-circular': { template: '<div class="spinner"/>' },
   'v-alert': { template: '<div class="v-alert"><slot/></div>', props: ['type', 'variant'] },
   'v-btn': { template: '<button><slot/></button>', props: ['icon', 'variant', 'to', 'loading', 'color', 'prepend-icon'] },
@@ -31,11 +38,14 @@ const stubs = {
   'v-row': { template: '<div class="v-row"><slot/></div>' },
   'v-col': { template: '<div class="v-col"><slot/></div>', props: ['cols', 'md'] },
   'v-card': { template: '<div class="v-card"><slot/></div>' },
+  'v-card-text': { template: '<div class="v-card-text"><slot/></div>' },
+  'v-card-actions': { template: '<div class="v-card-actions"><slot/></div>' },
   'v-divider': { template: '<hr/>' },
   'SummaryCard': { template: '<div class="summary-card"/>', props: ['value'] },
   'CodingCard': { template: '<div class="coding-card"/>', props: ['value'] },
   'SectionHeader': { template: '<div class="section-header">{{ title }}</div>', props: ['title', 'icon'] },
   'EmptyState': { template: '<div class="empty-state">{{ title }}</div>', props: ['icon', 'title'] },
+  'GraphView': { template: '<div class="graph-view"/>', props: ['scope', 'patientId', 'encounterIds', 'height'] },
 }
 
 const ENCOUNTER_LIST = [
@@ -75,21 +85,21 @@ async function makeWrapper(props) {
   router.push('/patient/HN1/encounter/E1')
   await router.isReady()
 
-  const { default: EncounterDetail } = await import('../EncounterDetail.vue')
-  return mount(EncounterDetail, {
-    props: { id: 'HN1', eid: 'E1', ...props },
+  const { default: EncounterDialog } = await import('../EncounterDialog.vue')
+  return mount(EncounterDialog, {
+    props: { patientId: 'HN1', eid: 'E1', ...props },
     global: { plugins: [router], stubs },
   })
 }
 
-describe('EncounterDetail.vue', () => {
+describe('EncounterDialog.vue', () => {
   it('renders header from encounter list', async () => {
     api.getLatestEncounterSummary.mockResolvedValue(null)
     api.getLatestEncounterCoding.mockResolvedValue(null)
     const w = await makeWrapper()
     await flushPromises()
+    // The toolbar title shows "type · dateTime" (department is no longer in the toolbar)
     expect(w.text()).toContain('admission')
-    expect(w.text()).toContain('IM')
   })
 
   it('shows "Regenerate summary" when latest summary exists', async () => {
