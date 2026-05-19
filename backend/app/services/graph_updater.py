@@ -328,3 +328,57 @@ def fetch_patient_graph(patient_id: str) -> dict[str, Any]:
         if pid and aid:
             edges.append({"from": pid, "to": aid, "type": "HAS_ALLERGY"})
     return {"nodes": nodes, "edges": edges}
+
+
+def _dedupe_key(node: dict[str, Any]) -> tuple | None:
+    """Return a hashable dedupe key, or None for node labels we don't dedupe.
+
+    Conditions: collapse by normalized_code; fall back to lowercased value.
+    Medications: collapse by rxNorm; fall back to lowercased name. A different
+        rxNorm for the same generic name stays separate (different formulations).
+    Allergies: same rule as Conditions.
+    Observations: NOT deduped — same name at different times is informative.
+    Documents / Plans / Procedures / Patient / Encounter: pass through.
+    """
+    label = node.get("label")
+    data = node.get("data") or {}
+    if label == "Condition":
+        return ("Condition", data.get("normalized_code") or str(data.get("value", "")).casefold())
+    if label == "Medication":
+        return ("Medication", data.get("rxNorm") or str(data.get("name", "")).casefold())
+    if label == "Allergy":
+        return ("Allergy", data.get("normalized_code") or str(data.get("value", "")).casefold())
+    return None
+
+
+def _dedupe_nodes_edges(graph: dict[str, Any]) -> dict[str, Any]:
+    """Collapse duplicate fact nodes across encounters; rewrite edges to the
+    surviving node id. Pure function — does NOT touch the network/Neo4j."""
+    nodes = graph.get("nodes") or []
+    edges = graph.get("edges") or []
+
+    canonical_id_by_key: dict[tuple, str] = {}
+    id_remap: dict[str, str] = {}
+    kept_nodes: list[dict[str, Any]] = []
+
+    for node in nodes:
+        key = _dedupe_key(node)
+        if key is None:
+            kept_nodes.append(node)
+            continue
+        canonical = canonical_id_by_key.get(key)
+        if canonical is None:
+            canonical_id_by_key[key] = node["id"]
+            kept_nodes.append(node)
+        else:
+            id_remap[node["id"]] = canonical  # drop this node; rewrite its inbound edges
+
+    rewritten_edges: list[dict[str, Any]] = []
+    for edge in edges:
+        rewritten_edges.append({
+            **edge,
+            "from": id_remap.get(edge["from"], edge["from"]),
+            "to": id_remap.get(edge["to"], edge["to"]),
+        })
+
+    return {"nodes": kept_nodes, "edges": rewritten_edges}
