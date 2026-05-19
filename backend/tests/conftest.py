@@ -321,6 +321,17 @@ class FakeStore:
                 for e in base:
                     e["document_count"] = sum(1 for d in self.documents.values() if d["encounter_id"] == e["encounter_id"])
                     e["fact_count"] = sum(1 for f in self.facts if f.get("encounter_id") == e["encounter_id"])
+            if "exists(select 1 from patient_summaries" in s:
+                for e in base:
+                    e["has_summary"] = any(
+                        r["kind"] == "summary" and r.get("encounter_id") == e["encounter_id"]
+                        for r in self.patient_summaries
+                    )
+                    e["has_coding"] = any(
+                        r["kind"] == "coding" and r.get("encounter_id") == e["encounter_id"]
+                        for r in self.patient_summaries
+                    )
+                    e["doc_count"] = sum(1 for d in self.documents.values() if d["encounter_id"] == e["encounter_id"])
             return FakeResult(base)
         if " from facts " in s or "from facts\n" in s:
             pid = params.get("pid")
@@ -508,6 +519,8 @@ def fake_store(monkeypatch):
     monkeypatch.setattr(pricing_mod, "db_session", _db_session)
     import app.services.ai_provider as ai_provider_mod
     monkeypatch.setattr(ai_provider_mod, "db_session", _db_session)
+    import app.services.summary_store as summary_store_mod
+    monkeypatch.setattr(summary_store_mod, "db_session", _db_session)
     import app.services.queue as queue_mod
     monkeypatch.setattr(queue_mod, "db_session", _db_session)
     import app.services.debug_queries as debug_queries_mod
