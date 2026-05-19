@@ -10,10 +10,26 @@ This module hosts:
 """
 from __future__ import annotations
 
+import asyncio
 import re
 from typing import Any
 
-from app.schemas.rag import RagCitation
+from fastapi import HTTPException
+from sqlalchemy import text
+
+from app.config import Settings
+from app.db.postgres import db_session
+from app.schemas.rag import (
+    PatientSearchHit, PatientSearchResponse, PatientSearchSnippet,
+    RagAskRequest, RagAskResponse, RagCitation,
+)
+from app.services.ai_provider import get_ai_provider
+from app.services.embeddings import _pgvector_literal, vector_search
+from app.services.runtime_config import effective as effective_settings
+
+
+_CHAT_HISTORY_MAX_TURNS = 6
+_CHAT_HISTORY_MAX_CHARS = 3000
 
 
 def parse_cited_indices(markdown: str) -> set[int]:
@@ -42,3 +58,137 @@ def build_citations(chunks: list[dict[str, Any]], answer: str) -> list[RagCitati
             cited=(n in cited),
         ))
     return out
+
+
+def _trim_history(history: list[dict[str, str]]) -> list[dict[str, str]]:
+    """Cap history at 6 turns AND ≤ 3000 chars total content. Drops oldest first."""
+    out = list(history)
+    while len(out) > _CHAT_HISTORY_MAX_TURNS:
+        out.pop(0)
+    while sum(len(t.get("content", "")) for t in out) > _CHAT_HISTORY_MAX_CHARS and out:
+        out.pop(0)
+    return out
+
+
+async def ask(req: RagAskRequest) -> RagAskResponse:
+    """RAG orchestrator: verify patient, retrieve chunks, call LLM, build citations."""
+    settings: Settings = effective_settings()
+
+    # 1. Verify the patient exists.
+    with db_session() as s:
+        row = s.execute(
+            text("SELECT patient_id FROM patients WHERE patient_id = :pid"),
+            {"pid": req.patientId},
+        ).mappings().first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Patient not found")
+
+    # 2. Retrieve top-K chunks (vector_search already returns `similarity`).
+    chunks = await vector_search(req.question, patient_id=req.patientId, limit=req.topK)
+    if not chunks:
+        raise HTTPException(
+            status_code=422,
+            detail="No embeddings for this patient; ingest a note first.",
+        )
+
+    # 3. Trim history (chat mode only) — defensive even in one_shot.
+    history = _trim_history(
+        [{"role": m.role, "content": m.content} for m in req.history]
+    ) if req.mode == "chat" else []
+
+    # 4. Call the LLM.
+    t0 = asyncio.get_running_loop().time()
+    provider = get_ai_provider()
+    answer, rec = await provider.rag_ask(
+        question=req.question,
+        chunks=chunks,
+        history=history,
+        patient_id=req.patientId,
+    )
+    latency_ms = int((asyncio.get_running_loop().time() - t0) * 1000)
+
+    # 5. Build citations.
+    citations = build_citations(chunks, answer)
+
+    return RagAskResponse(
+        patientId=req.patientId,
+        question=req.question,
+        answer=answer,
+        citations=citations,
+        modelUsed=rec.model,
+        embeddingModel=settings.AI_EMBEDDING_MODEL,
+        latencyMs=latency_ms,
+        costUsd=float(rec.cost_usd) if rec.cost_usd is not None else None,
+    )
+
+
+async def search_patients(q: str, limit: int = 10) -> PatientSearchResponse:
+    """Free-text → ranked patient list by max-similarity of any embedding."""
+    settings: Settings = effective_settings()
+    t0 = asyncio.get_running_loop().time()
+    provider = get_ai_provider()
+    try:
+        qvec, _rec = await provider.embed(q)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Embedding upstream error: {exc}")
+    if not qvec:
+        raise HTTPException(status_code=502, detail="Embedding returned empty vector")
+
+    sql = """
+        WITH ranked AS (
+          SELECT
+            e.patient_id,
+            1 - (e.embedding <=> CAST(:qvec AS vector)) AS score,
+            e.content,
+            e.ref_type, e.ref_id,
+            ROW_NUMBER() OVER (
+              PARTITION BY e.patient_id
+              ORDER BY e.embedding <=> CAST(:qvec AS vector) ASC
+            ) AS rn
+          FROM embeddings e
+          WHERE e.patient_id IS NOT NULL
+        )
+        SELECT
+          r.patient_id,
+          p.name,
+          MAX(r.score) AS score,
+          JSON_AGG(JSON_BUILD_OBJECT(
+            'refType', r.ref_type, 'refId', r.ref_id,
+            'content', LEFT(r.content, 300), 'score', r.score
+          ) ORDER BY r.score DESC) FILTER (WHERE r.rn <= 3) AS top_snippets
+        FROM ranked r
+        LEFT JOIN patients p ON p.patient_id = r.patient_id
+        GROUP BY r.patient_id, p.name
+        ORDER BY MAX(r.score) DESC
+        LIMIT :limit
+    """
+    with db_session() as s:
+        rows = s.execute(
+            text(sql),
+            {"qvec": _pgvector_literal(qvec), "limit": limit},
+        ).mappings().all()
+
+    results = [
+        PatientSearchHit(
+            patientId=r["patient_id"],
+            name=r.get("name"),
+            score=float(r["score"]),
+            snippets=[
+                PatientSearchSnippet(
+                    refType=s["refType"],
+                    refId=s["refId"],
+                    content=s["content"],
+                    score=float(s["score"]),
+                )
+                for s in (r.get("top_snippets") or [])
+            ],
+        )
+        for r in rows
+    ]
+    latency_ms = int((asyncio.get_running_loop().time() - t0) * 1000)
+    return PatientSearchResponse(
+        query=q,
+        embeddingModel=settings.AI_EMBEDDING_MODEL,
+        latencyMs=latency_ms,
+        results=results,
+    )
