@@ -16,6 +16,11 @@ const routes = [
     component: () => import('./views/EncounterDetail.vue'),
     props: true,
   },
+  {
+    path: '/vector-demo',
+    component: () => import('./views/VectorDemoView.vue'),
+    name: 'vector-demo',
+  },
   { path: '/ingest', component: IngestView, name: 'ingest' },
   { path: '/config', component: ConfigView, name: 'config' },
   { path: '/debug', component: DebugView, name: 'debug' },
