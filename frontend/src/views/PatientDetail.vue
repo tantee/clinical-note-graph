@@ -70,49 +70,8 @@
           </v-col>
         </v-row>
 
-        <v-card v-if="summary" ref="summaryCard" class="mt-4">
-          <SectionHeader title="AI summary" icon="mdi-text-box-outline">
-            <span class="text-caption text-grey-darken-1 ml-2">
-              ({{ summary.type }}{{ summary.createdAt ? ' · ' + new Date(summary.createdAt).toLocaleString() : '' }})
-            </span>
-            <template #actions>
-              <v-chip v-if="summary.vaultPath" size="x-small" variant="tonal" prepend-icon="mdi-folder-outline" class="mr-1">
-                {{ summary.vaultPath }}
-              </v-chip>
-              <v-chip size="x-small" color="warning" variant="tonal">AI-assisted</v-chip>
-            </template>
-          </SectionHeader>
-          <v-divider />
-          <v-card-text>
-            <div class="cng-markdown" v-html="renderedSummary" />
-          </v-card-text>
-        </v-card>
-
-        <v-card v-if="codingResp" ref="codingCard" class="mt-4">
-          <SectionHeader title="Coding suggestion" icon="mdi-medical-bag-outline">
-            <template #actions><v-chip size="x-small" color="warning" variant="tonal">AI-assisted</v-chip></template>
-          </SectionHeader>
-          <v-divider />
-          <v-card-text>
-            <div v-if="codingResp.primaryDiagnosis" class="mb-2">
-              <span class="text-body-2 text-grey-darken-1">Primary</span><br />
-              <strong>{{ codingResp.primaryDiagnosis.condition }}</strong>
-              <v-chip v-if="codingResp.primaryDiagnosis.icd10" size="x-small" class="ml-2">ICD-10 {{ codingResp.primaryDiagnosis.icd10 }}</v-chip>
-              <v-chip v-if="codingResp.primaryDiagnosis.snomed" size="x-small" class="ml-1">SNOMED {{ codingResp.primaryDiagnosis.snomed }}</v-chip>
-            </div>
-            <div v-if="codingResp.secondaryDiagnoses?.length">
-              <div class="text-body-2 text-grey-darken-1 mb-1 mt-3">Secondary</div>
-              <div v-for="(d, i) in codingResp.secondaryDiagnoses" :key="i" class="mb-1">
-                {{ d.condition }}
-                <v-chip v-if="d.icd10" size="x-small" class="ml-1">ICD-10 {{ d.icd10 }}</v-chip>
-                <v-chip v-if="d.snomed" size="x-small" class="ml-1">SNOMED {{ d.snomed }}</v-chip>
-              </div>
-            </div>
-            <v-alert v-if="codingResp.disclaimer" type="warning" variant="tonal" density="compact" class="mt-3">
-              {{ codingResp.disclaimer }}
-            </v-alert>
-          </v-card-text>
-        </v-card>
+        <SummaryCard ref="summaryCard" :value="summary" />
+        <CodingCard ref="codingCard" :value="codingResp" />
       </v-window-item>
 
       <!-- Timeline -->
@@ -267,7 +226,6 @@
 
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
-import { marked } from 'marked'
 import { FACT_TYPE_META } from '../constants/clinical.js'
 import {
   getPatient, getTimeline, getGraph, getNotes, getNote,
@@ -281,6 +239,8 @@ import Timeline from '../components/Timeline.vue'
 import SectionHeader from '../components/SectionHeader.vue'
 import EmptyState from '../components/EmptyState.vue'
 import FactCard from '../components/FactCard.vue'
+import SummaryCard from '../components/SummaryCard.vue'
+import CodingCard from '../components/CodingCard.vue'
 
 const props = defineProps({ id: { type: String, required: true } })
 const ui = useUiStore()
@@ -400,8 +360,6 @@ async function onReviewChange(fact, status) {
     fact.review_status = prev
   }
 }
-
-const renderedSummary = computed(() => marked.parse(summary.value?.markdown || ''))
 
 const FOLDER_ORDER = ['visits', 'summaries', 'problems', 'medications', 'observations', 'labs', 'plans', 'allergies', 'procedures', 'sources']
 const FOLDER_LABELS = {
