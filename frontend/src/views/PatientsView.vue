@@ -27,7 +27,8 @@
         :headers="headers"
         :loading="loading"
         item-value="patient_id"
-        @click:row="(_, { item }) => goPatient(item.patient_id)"
+        show-expand
+        v-model:expanded="expanded"
         density="comfortable"
         :items-per-page="20"
         :items-per-page-options="[10, 20, 50]"
@@ -46,7 +47,15 @@
           <div class="text-caption text-grey">{{ formatRelative(item.updated_at) }}</div>
         </template>
         <template #item.actions="{ item }">
-          <v-btn size="small" variant="text" :to="{ name: 'patient', params: { id: item.patient_id } }" append-icon="mdi-arrow-right">Open</v-btn>
+          <v-btn size="small" variant="tonal" color="primary" :to="{ name: 'patient', params: { id: item.patient_id } }">View patient</v-btn>
+        </template>
+
+        <template #expanded-row="{ item, columns }">
+          <tr class="v-data-table__tr">
+            <td :colspan="columns.length">
+              <PatientEncountersInline :patient-id="item.patient_id" />
+            </td>
+          </tr>
         </template>
       </v-data-table>
     </v-card>
@@ -62,15 +71,15 @@
 
 <script setup>
 import { onMounted, ref } from 'vue'
-import { useRouter } from 'vue-router'
 import { listPatients } from '../api/client.js'
 import { formatDate, formatRelative } from '../utils/format.js'
 import EmptyState from '../components/EmptyState.vue'
+import PatientEncountersInline from '../components/PatientEncountersInline.vue'
 
-const router = useRouter()
 const patients = ref([])
 const loading = ref(false)
 const q = ref('')
+const expanded = ref([])
 
 const headers = [
   { title: 'Patient ID', key: 'patient_id', sortable: true },
@@ -79,6 +88,7 @@ const headers = [
   { title: 'Birth date', key: 'birth_date' },
   { title: 'Updated', key: 'updated_at' },
   { title: '', key: 'actions', sortable: false, align: 'end' },
+  { title: '', key: 'data-table-expand' },
 ]
 
 let debounceHandle = null
@@ -98,7 +108,6 @@ async function reload() {
   }
 }
 
-function goPatient(id) { router.push({ name: 'patient', params: { id } }) }
 const genderColor = (g) => (g === 'female' ? 'pink' : g === 'male' ? 'blue' : 'grey')
 
 onMounted(reload)
