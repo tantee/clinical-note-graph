@@ -94,6 +94,14 @@ class FakeStore:
         self.embeddings: list[dict] = []
         self.pricing: dict[str, dict] = {}
         self.patient_summaries: list[dict] = []
+        self.patient_search_results: list[dict] | None = None  # set via prime_patient_search_results()
+
+    def prime_patient_search_results(self, rows: list[dict]) -> None:
+        """Tests call this to seed what the next /api/search/patients call returns.
+
+        Rows should have shape: {patient_id, name, score, top_snippets: [{refType, refId, content, score}, ...]}.
+        """
+        self.patient_search_results = list(rows)
 
     def execute(self, sql: str, params: dict[str, Any]) -> FakeResult:
         s = sql.lower()
@@ -301,6 +309,27 @@ class FakeStore:
                 return FakeResult([row] if row else [])
             return FakeResult(sorted(self.pricing.values(), key=lambda r: r["model"]))
 
+        # Patient-search grouped SQL (ROW_NUMBER OVER ... FROM embeddings ... JSON_AGG)
+        if "row_number() over" in s and "from embeddings" in s and "json_agg" in s:
+            if self.patient_search_results is None:
+                return FakeResult([])
+            return FakeResult(self.patient_search_results)
+        # vector_search SELECT (used by RAG service)
+        if "from embeddings" in s and "embedding <=>" in s and "limit" in s and "row_number" not in s:
+            pid = params.get("p")
+            limit = int(params.get("lim") or 10)
+            candidates = [e for e in self.embeddings if (pid is None or e.get("patient_id") == pid)]
+            # Deterministic synthetic similarity — return rows in stored order with fake scores.
+            return FakeResult([
+                {
+                    "ref_type": e.get("ref_type"),
+                    "ref_id": e.get("ref_id"),
+                    "content": e.get("content"),
+                    "patient_id": e.get("patient_id"),
+                    "similarity": 0.85 - (i * 0.05),
+                }
+                for i, e in enumerate(candidates[:limit])
+            ])
         # SELECTs
         if "select" in s and " from patients" in s:
             if ":pid" in s and not "ilike" in s:
@@ -538,6 +567,53 @@ def fake_store(monkeypatch):
     monkeypatch.setattr(p_router, "db_session", _db_session)
     import app.routers.encounter as encounter_router
     monkeypatch.setattr(encounter_router, "db_session", _db_session)
+    import app.services.rag as rag_mod
+    monkeypatch.setattr(rag_mod, "db_session", _db_session)
+
+    # vector_search calls embed() before hitting SQL; MockProvider.embed returns [].
+    # Override with a pure in-memory version so RAG tests work without a real vector model.
+    import app.services.embeddings as _emb_mod_for_vs
+
+    async def _fake_vector_search(query: str, *, patient_id=None, limit: int = 10):
+        candidates = [e for e in store.embeddings if (patient_id is None or e.get("patient_id") == patient_id)]
+        return [
+            {
+                "ref_type": e.get("ref_type"),
+                "ref_id": e.get("ref_id"),
+                "content": e.get("content"),
+                "patient_id": e.get("patient_id"),
+                "similarity": 0.85 - (i * 0.05),
+            }
+            for i, e in enumerate(candidates[:limit])
+        ]
+
+    monkeypatch.setattr(_emb_mod_for_vs, "vector_search", _fake_vector_search)
+    monkeypatch.setattr(rag_mod, "vector_search", _fake_vector_search)
+
+    # search_patients also calls provider.embed() directly; stub it to return a
+    # dummy vector so it continues to the (patched) SQL rather than raising 502.
+    import app.services.ai_provider as _ai_prov_mod
+
+    _real_get_ai_provider = _ai_prov_mod.get_ai_provider
+
+    class _MockEmbedProvider:
+        """Thin wrapper: real MockProvider but embed() returns a dummy 3-dim vector."""
+
+        def __init__(self, inner):
+            self._inner = inner
+
+        async def embed(self, text_in, *, job_id=None, patient_id=None, ref_id=None):
+            _vec, rec = await self._inner.embed(text_in, job_id=job_id, patient_id=patient_id, ref_id=ref_id)
+            return [0.1, 0.2, 0.3], rec
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+    def _patched_get_ai_provider():
+        return _MockEmbedProvider(_real_get_ai_provider())
+
+    monkeypatch.setattr(rag_mod, "get_ai_provider", _patched_get_ai_provider)
+
     import app.routers.jobs as jobs_router
     monkeypatch.setattr(jobs_router, "db_session", _db_session)
     import app.db.helpers as h_mod
