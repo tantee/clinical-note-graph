@@ -28,8 +28,11 @@
 <script setup>
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { Network, DataSet } from 'vis-network/standalone/esm/vis-network'
+import { useUiStore } from '../stores/ui.js'
 import SectionHeader from './SectionHeader.vue'
 import EmptyState from './EmptyState.vue'
+
+const ui = useUiStore()
 
 const props = defineProps({
   data: { type: Object, default: () => ({ nodes: [], edges: [] }) },
@@ -61,21 +64,30 @@ function tooltip(n) {
   return `${n.label}\n${JSON.stringify(n.data, null, 2)}`
 }
 
+function themeColors() {
+  // Read live theme tokens so labels stay legible after dark/light toggle.
+  const style = getComputedStyle(document.documentElement)
+  const onBg = style.getPropertyValue('--v-theme-on-background').trim() || '0,0,0'
+  const surface = style.getPropertyValue('--v-theme-surface').trim() || '255,255,255'
+  return { label: `rgb(${onBg})`, stroke: `rgb(${surface})` }
+}
+
 function render() {
   if (!container.value || !props.data) return
+  const { label: labelColor, stroke: strokeColor } = themeColors()
   const nodes = new DataSet((props.data.nodes || []).map((n) => ({
     id: n.id,
     label: shortLabel(n),
     title: tooltip(n),
     color: { background: COLORS[n.label] || '#90a4ae', border: '#37474f' },
-    font: { color: '#fff' },
+    font: { color: labelColor, strokeColor, strokeWidth: 3, size: 12 },
     shape: 'dot',
     size: n.label === 'Patient' ? 24 : 14,
   })))
   const edges = new DataSet((props.data.edges || []).map((e, i) => ({
     id: 'e' + i, from: e.from, to: e.to, label: e.type, arrows: 'to',
-    font: { size: 9, color: '#888', strokeWidth: 0 },
-    color: { color: '#bdbdbd', highlight: '#1f6feb' },
+    font: { size: 9, color: labelColor, strokeColor, strokeWidth: 3 },
+    color: { color: '#9e9e9e', highlight: '#1f6feb' },
     smooth: { type: 'continuous' },
   })))
   if (network) network.destroy()
@@ -91,6 +103,7 @@ function fit() {
 }
 
 watch(() => props.data, render, { deep: true })
+watch(() => ui.theme, () => render())
 onMounted(render)
 onBeforeUnmount(() => network && network.destroy())
 </script>
@@ -100,7 +113,10 @@ onBeforeUnmount(() => network && network.destroy())
 .graph-canvas { background: rgba(127,127,127,0.04); border-radius: 0; }
 .graph-legend {
   position: absolute; top: 12px; right: 12px;
-  background: rgba(255,255,255,0.85); backdrop-filter: blur(4px);
+  background: rgb(var(--v-theme-surface) / 0.9);
+  color: rgb(var(--v-theme-on-surface));
+  border: 1px solid rgb(var(--v-theme-on-surface) / 0.12);
+  backdrop-filter: blur(4px);
   border-radius: 8px; padding: 6px 10px; font-size: 12px;
   box-shadow: 0 1px 4px rgba(0,0,0,0.08);
 }

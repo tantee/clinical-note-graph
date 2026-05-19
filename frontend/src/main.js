@@ -10,7 +10,8 @@ import './styles/app.css'
 
 const vuetify = createVuetify({
   defaults: {
-    VCard: { rounded: 'lg' },
+    // Vuetify v4: elevation scale is 0–5 (MD3). 1 = soft card shadow.
+    VCard: { rounded: 'lg', elevation: 1 },
     VBtn: { rounded: 'lg', class: 'text-none' },
     VTextField: { variant: 'outlined', density: 'comfortable' },
     VSelect: { variant: 'outlined', density: 'comfortable' },

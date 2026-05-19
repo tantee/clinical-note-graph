@@ -15,6 +15,7 @@ from app.services.graph_updater import fetch_patient_graph
 from app.services.markdown_generator import collect_backlinks, list_patient_files, read_note
 from app.services.patient_facts import gather_patient_facts
 from app.services.summary import make_summary
+from app.services.summary_store import latest_coding, latest_summary
 
 router = APIRouter(prefix="/api", tags=["patient"])
 
@@ -136,9 +137,20 @@ async def patient_summary(patient_id: str, req: SummaryRequest):
     return await make_summary(patient_id, req)
 
 
+@router.get("/patient/{patient_id}/summary/latest")
+def patient_summary_latest(patient_id: str) -> dict[str, Any] | None:
+    """Return the most recent persisted summary, or null if none has been generated."""
+    return latest_summary(patient_id)
+
+
 @router.post("/patient/{patient_id}/coding/suggest", response_model=CodingSuggestResponse)
 async def patient_coding(patient_id: str, req: CodingSuggestRequest):
     return await suggest_coding(patient_id, req)
+
+
+@router.get("/patient/{patient_id}/coding/latest")
+def patient_coding_latest(patient_id: str) -> dict[str, Any] | None:
+    return latest_coding(patient_id)
 
 
 @router.patch("/facts/{fact_id}/review")
