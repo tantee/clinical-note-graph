@@ -5,7 +5,7 @@
                     v-model="q" placeholder="Search patients…"
                     prepend-inner-icon="mdi-magnify"
                     variant="outlined" density="compact" hide-details
-                    style="max-width: 320px;"
+                    style="width: 280px;"
                     @update:model-value="onInput"
                     @focus="onFocus" />
     </template>
