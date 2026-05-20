@@ -66,6 +66,8 @@ services:
       CORS_ORIGINS: ${CORS_ORIGINS:-*}
       API_KEY: ${BACKEND_API_KEY:-}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      DEIDENTIFY_LEVEL: ${DEIDENTIFY_LEVEL:-safe_harbor}
+      DEIDENTIFY_NER_THRESHOLD: ${DEIDENTIFY_NER_THRESHOLD:-0.5}
     ports:
       - "${BACKEND_PORT:-8000}:8000"
     volumes:

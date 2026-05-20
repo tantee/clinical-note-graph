@@ -16,14 +16,18 @@ A Dockerised prototype that turns inbound EMR documents into:
 
 ## Documentation
 
-| Page | When to read |
-|---|---|
-| [docs/ai-providers.md](docs/ai-providers.md) | Configure OpenRouter / OpenAI / Groq / self-host; per-task model overrides; cost-effective preset stacks. |
-| [docs/api.md](docs/api.md) | HTTP API surface, Neo4j graph model, markdown vault layout. |
-| [docs/operations.md](docs/operations.md) | Async ingest queue, cost tracking, the test pyramid (unit → integration → e2e). |
-| [docs/deployment.md](docs/deployment.md) | Production overlay (Caddy + Let's Encrypt), required env vars, operational endpoints. |
-| [docs/compliance.md](docs/compliance.md) | **Read before pointing at real data.** PHI dataflow audit, HIPAA / GDPR / PDPA framing, de-identification, regulatory posture. |
-| [docs/changelog.md](docs/changelog.md) | Notable structural changes since the MVP first draft. |
+Ordered by reader intent. Each page tags its audience at the top.
+
+| Page | Audience | When to read |
+|---|---|---|
+| [docs/deployment.md](docs/deployment.md) | Operator | Dev quick start, prod pre-flight checklist, TLS modes, resource sizing, backups, updates, observability, failure recovery, security hardening. |
+| [docs/ai-providers.md](docs/ai-providers.md) | Operator / integrator | Configure OpenRouter / OpenAI / Groq / self-host; per-task model overrides; cost-effective preset stacks. |
+| [docs/compliance.md](docs/compliance.md) | Privacy / security reviewer | **Read before pointing at real data.** PHI dataflow audit, HIPAA / GDPR / PDPA framing, de-identification, regulatory posture. |
+| [docs/api.md](docs/api.md) | Integrator | HTTP API surface, Neo4j graph model, markdown vault layout. |
+| [docs/operations.md](docs/operations.md) | Operator / contributor | Async ingest queue, cost tracking, the test pyramid (unit → integration → e2e). |
+| [docs/troubleshooting.md](docs/troubleshooting.md) | Everyone | Common gotchas, "is it supposed to do that?" answers, source-of-truth pointers. |
+| [docs/glossary.md](docs/glossary.md) | Newcomers | HN, encounter, fact, summary type, BAA, etc. — terms used throughout. |
+| [docs/changelog.md](docs/changelog.md) | Everyone | Notable structural changes since the MVP first draft. |
 
 ---
 
@@ -65,33 +69,23 @@ The AI never writes to the database directly. Its JSON is parsed, validated, and
 
 ---
 
-## Quick start (development)
+## Quick start
 
 ```bash
-git clone <this-repo>
+git clone https://github.com/tantee/clinical-note-graph
 cd clinical-note-graph
-cp .env.example .env   # default uses the offline mock AI provider
-docker compose up --build
+cp .env.example .env       # default: offline mock AI provider
+docker compose up --build  # ~5 min cold (pulls Presidio + spaCy + PyThaiNLP models)
 ```
 
-Endpoints:
-
-| Service | URL | Notes |
-|---|---|---|
-| **Unified app (Caddy proxy)** | http://localhost | Recommended. `/` → Vue UI · `/api/*`, `/docs`, `/openapi.json`, `/redoc`, `/health`, `/ready` → backend |
-| Frontend (Vite dev server) | http://localhost:5173 | Direct access; useful for full Vue devtools / HMR |
-| Backend (FastAPI) | http://localhost:8000 · docs at /docs | Bypasses the proxy; handy for `curl` and integration scripts |
-| Neo4j Browser | http://localhost:7474 | user `neo4j`, password `neo4jpass` |
-| Postgres | localhost:5432 | exposed for local tooling |
-
-Try the demo:
+Open <http://localhost>. Try the demo data:
 
 ```bash
-./examples/ingest.sh                                       # send sample EMRs (hits the backend directly)
-open http://localhost/#/patients/HN123456                  # explore via the unified Caddy proxy
+./examples/ingest.sh                              # ingest sample EMRs
+open http://localhost/#/patients/HN123456         # explore the patient
 ```
 
-To point at a real AI provider, edit `.env` and follow [docs/ai-providers.md](docs/ai-providers.md).
+For port maps, resetting state, switching AI providers, and the full prod path, see [docs/deployment.md](docs/deployment.md).
 
 ---
 
