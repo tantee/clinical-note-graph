@@ -178,8 +178,16 @@ class FakeStore:
                 and r["kind"] == kind
                 and (eid is None or r.get("encounter_id") == eid)
             ]
+            # gather_patient_facts_for_ai pulls every encounter-scoped summary
+            # for a patient (no LIMIT); the legacy `latest_*` queries use
+            # `LIMIT 1`. Honour both: filter by `encounter_id IS NOT NULL`
+            # when the SQL says so, and slice to one only when the SQL asks.
+            if "encounter_id is not null" in s:
+                rows = [r for r in rows if r.get("encounter_id") is not None]
             rows.sort(key=lambda r: r["created_at"], reverse=True)
-            return FakeResult(rows[:1])
+            if "limit 1" in s:
+                return FakeResult(rows[:1])
+            return FakeResult(rows)
         if s.startswith("insert into ai_outputs"):
             rc_raw = params.get("redaction_counts")
             if isinstance(rc_raw, str):

@@ -7,7 +7,7 @@ from typing import Any
 from app.schemas.coding import CodingSuggestRequest, CodingSuggestResponse
 from app.schemas.extraction import CodingCandidate, DiagnosisCandidate
 from app.services.ai_provider import get_ai_provider
-from app.services.patient_facts import gather_patient_facts
+from app.services.patient_facts import gather_patient_facts_for_ai
 from app.services.summary_store import save_coding
 
 
@@ -32,8 +32,24 @@ _CODING_RETRY_ADDENDUM = (
 )
 
 
+def _patient_has_problems(facts: dict[str, Any]) -> bool:
+    """True if the patient has any condition/diagnosis worth retrying on.
+
+    Looks at chronicProblems (patient-wide dedup'd list) and falls back to
+    walking the encounters for raw_facts diagnoses — covers the edge case
+    where a condition only appears as an encounter-scoped diagnosis_candidate
+    and didn't make it into the deduped chronic list.
+    """
+    if facts.get("chronicProblems"):
+        return True
+    for enc in facts.get("encounters") or []:
+        if enc.get("problems") or enc.get("diagnoses"):
+            return True
+    return False
+
+
 async def suggest_coding(patient_id: str, req: CodingSuggestRequest) -> CodingSuggestResponse:
-    facts = await asyncio.to_thread(gather_patient_facts, patient_id)
+    facts = await asyncio.to_thread(gather_patient_facts_for_ai, patient_id)
     provider = get_ai_provider()
     raw, rec = await provider.suggest_coding(
         patient_facts=facts, standards=req.standards, patient_id=patient_id,
@@ -42,7 +58,7 @@ async def suggest_coding(patient_id: str, req: CodingSuggestRequest) -> CodingSu
     # once with an explicit reminder of the rules from CODING_SUGGEST_SYSTEM.
     # Only retry when the patient actually has problems — empty input
     # legitimately produces empty output.
-    if (facts.get("problems") or facts.get("diagnoses")) and not _has_any_codes(raw):
+    if _patient_has_problems(facts) and not _has_any_codes(raw):
         raw, rec = await provider.suggest_coding(
             patient_facts=facts, standards=req.standards, patient_id=patient_id,
             system_addendum=_CODING_RETRY_ADDENDUM,

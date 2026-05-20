@@ -151,6 +151,148 @@ def gather_patient_facts(patient_id: str, *, start: str | None = None, end: str 
     }
 
 
+# Mapping from the `facts.type` enum to the camelCase bucket name used in the
+# encounter raw_facts payload below. Kept in sync with the keys
+# gather_patient_facts emits at top level so the model sees a consistent vocab.
+_ENCOUNTER_FACT_BUCKETS: dict[str, str] = {
+    "condition": "problems",
+    "medication": "medications",
+    "observation": "observations",
+    "procedure": "procedures",
+    "plan": "plans",
+    "diagnosis_candidate": "diagnoses",
+    "coding_candidate": "codingCandidates",
+    # Allergies are sent at the patient header level (cross-encounter), so we
+    # deliberately drop encounter-scoped allergy rows from the per-encounter
+    # payload to avoid duplication.
+}
+
+
+def gather_patient_facts_for_ai(
+    patient_id: str,
+    *,
+    prefer_summaries: bool = True,
+    start: str | None = None,
+    end: str | None = None,
+) -> dict[str, Any]:
+    """Build the patient-level payload that goes to summary / coding AI calls.
+
+    Shape:
+      {
+        patient:         {...},          # patient row (cross-encounter)
+        allergies:       [...],          # cross-encounter, dedup'd
+        chronicProblems: [...],          # cross-encounter dedup'd conditions
+        encounters: [                    # ordered by date_time ASC
+          { encounterId, type, dateTime, department, provider,
+            representation: "summary",
+            markdown: "..." },
+          { encounterId, ..., representation: "raw_facts",
+            problems, medications, observations, procedures,
+            plans, diagnoses, codingCandidates },
+        ],
+      }
+
+    When `prefer_summaries=True` and a given encounter has a persisted
+    encounter-level summary in `patient_summaries`, that encounter collapses
+    to the summary markdown instead of its raw facts dict. The savings show
+    up most on long-history patients where many encounters have already been
+    summarised. `dateTime` is preserved on every encounter regardless of
+    representation so the model can still reason about temporal ordering.
+    """
+    base = gather_patient_facts(patient_id, start=start, end=end)
+
+    summaries_by_eid: dict[str, str] = {}
+    if prefer_summaries:
+        with db_session() as s:
+            rows = s.execute(
+                text(
+                    "SELECT encounter_id, markdown FROM patient_summaries "
+                    "WHERE patient_id = :pid AND kind = 'summary' "
+                    "AND encounter_id IS NOT NULL "
+                    "ORDER BY created_at DESC"
+                ),
+                {"pid": patient_id},
+            ).mappings().all()
+        for r in rows:
+            eid = r.get("encounter_id")
+            md = r.get("markdown")
+            # ORDER DESC means the first row per encounter is the latest summary.
+            if eid and md and eid not in summaries_by_eid:
+                summaries_by_eid[eid] = md
+
+    where_clauses = [
+        "patient_id = :pid",
+        "encounter_id IS NOT NULL",
+        "review_status <> 'rejected'",
+    ]
+    params: dict[str, Any] = {"pid": patient_id}
+    if start:
+        where_clauses.append("(date_time IS NULL OR date_time >= :start)")
+        params["start"] = start
+    if end:
+        where_clauses.append("(date_time IS NULL OR date_time <= :end)")
+        params["end"] = end
+    where = " AND ".join(where_clauses)
+    with db_session() as s:
+        fact_rows = s.execute(
+            text(
+                f"SELECT * FROM facts WHERE {where} "
+                "ORDER BY date_time NULLS LAST, created_at ASC"
+            ),
+            params,
+        ).mappings().all()
+
+    by_enc: dict[str, dict[str, list[dict[str, Any]]]] = {}
+    for r in fact_rows:
+        d = dict(r)
+        if d.get("id") is not None:
+            d["id"] = str(d["id"])
+        if d.get("confidence") is not None:
+            d["confidence"] = float(d["confidence"])
+        eid = d.get("encounter_id")
+        bucket = _ENCOUNTER_FACT_BUCKETS.get(d.get("type"))
+        if not eid or not bucket:
+            continue
+        by_enc.setdefault(eid, {}).setdefault(bucket, []).append(d)
+
+    encounters_out: list[dict[str, Any]] = []
+    for enc in base["encounters"]:
+        eid = enc["encounter_id"]
+        common = {
+            "encounterId": eid,
+            "type": enc.get("type"),
+            "dateTime": str(enc["date_time"]) if enc.get("date_time") else None,
+            "department": enc.get("department"),
+            "provider": enc.get("provider"),
+        }
+        if eid in summaries_by_eid:
+            encounters_out.append({
+                **common,
+                "representation": "summary",
+                "markdown": summaries_by_eid[eid],
+            })
+            continue
+        tbuckets = by_enc.get(eid, {})
+        encounters_out.append({
+            **common,
+            "representation": "raw_facts",
+            "problems": tbuckets.get("problems", []),
+            "medications": tbuckets.get("medications", []),
+            "observations": tbuckets.get("observations", []),
+            "procedures": tbuckets.get("procedures", []),
+            "plans": tbuckets.get("plans", []),
+            "diagnoses": tbuckets.get("diagnoses", []),
+            "codingCandidates": tbuckets.get("codingCandidates", []),
+        })
+
+    return {
+        "patient": base["patient"],
+        "allergies": base["allergies"],
+        "chronicProblems": base["problems"],
+        "encounters": encounters_out,
+    }
+
+
 def gather_encounter_facts(encounter_id: str) -> dict[str, Any]:
     """Aggregate facts for a single encounter plus background patient context.
 
