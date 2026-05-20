@@ -344,8 +344,23 @@ def get_document(patient_id: str, document_id: str, include_raw: bool = Query(Tr
     }
 
 
-@router.post("/patient/{patient_id}/summary", response_model=SummaryResponse)
-async def patient_summary(patient_id: str, req: SummaryRequest):
+@router.post("/patient/{patient_id}/summary")
+async def patient_summary(
+    patient_id: str,
+    req: SummaryRequest,
+    async_processing: bool = Query(
+        False, alias="async",
+        description="If true, enqueue the call and return a jobId immediately. "
+                    "Default false so existing callers keep getting the sync "
+                    "SummaryResponse shape; the UI sets ?async=true so long "
+                    "reasoning-model calls don't block the page.",
+    ),
+):
+    if async_processing:
+        from app.services.jobs import schedule_patient_summary
+        job_id = schedule_patient_summary(patient_id, req)
+        return {"jobId": job_id, "status": "queued", "type": "patient_summary",
+                "patientId": patient_id}
     return await make_summary(patient_id, req)
 
 
@@ -355,8 +370,22 @@ def patient_summary_latest(patient_id: str) -> dict[str, Any] | None:
     return latest_summary(patient_id)
 
 
-@router.post("/patient/{patient_id}/coding/suggest", response_model=CodingSuggestResponse)
-async def patient_coding(patient_id: str, req: CodingSuggestRequest):
+@router.post("/patient/{patient_id}/coding/suggest")
+async def patient_coding(
+    patient_id: str,
+    req: CodingSuggestRequest,
+    async_processing: bool = Query(
+        False, alias="async",
+        description="If true, enqueue the call and return a jobId immediately. "
+                    "Default false so existing callers keep getting the sync "
+                    "CodingSuggestResponse shape.",
+    ),
+):
+    if async_processing:
+        from app.services.jobs import schedule_patient_coding
+        job_id = schedule_patient_coding(patient_id, req)
+        return {"jobId": job_id, "status": "queued", "type": "patient_coding",
+                "patientId": patient_id}
     return await suggest_coding(patient_id, req)
 
 
