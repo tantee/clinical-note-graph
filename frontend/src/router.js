@@ -18,6 +18,11 @@ const routes = [
     component: PatientDetail,
     props: true,
   },
+  {
+    path: '/vector-demo',
+    component: () => import('./views/VectorDemoView.vue'),
+    name: 'vector-demo',
+  },
   { path: '/ingest', component: IngestView, name: 'ingest' },
   { path: '/config', component: ConfigView, name: 'config' },
   { path: '/debug', component: DebugView, name: 'debug' },

@@ -532,3 +532,105 @@ A full review-and-polish pass landed before this release. Highlights:
 - 36 backend tests (unit + integration with in-memory fake stores).
 - E2E smoke (`scripts/e2e.sh`) against the real compose stack.
 - Frontend Vitest + Vue Test Utils + Playwright browser E2E.
+
+---
+
+## Compliance & data handling
+
+> **TL;DR:** This is a **prototype**. The default `AI_PROVIDER=mock` sends nothing
+> off the host. Any other provider sends Protected Health Information (PHI) to
+> a third party — that's a regulated activity in most jurisdictions. **Do not
+> point this at real patient data without a privacy/security review.**
+
+### What leaves the host when AI_PROVIDER is not `mock`
+
+Five distinct call types each ship PHI-bearing text over HTTPS to whatever
+endpoint `AI_BASE_URL` resolves to:
+
+| Call | Endpoint | What's in the body |
+|---|---|---|
+| **extract** (per ingest) | `/v1/chat/completions` | Patient ID, encounter type, encounter date/time, document ID, **the full raw EMR text** (which typically contains patient name, DOB, clinical narrative) |
+| **summary** / **coding** | `/v1/chat/completions` | A JSON-serialised `patient_facts` dict — patient row (HN/name/gender/birth_date/metadata), every encounter, every extracted fact (conditions, meds, observations, plans, allergies, diagnoses) with original `evidenceText` |
+| **embed** (per fact + per markdown note at ingest, plus once per search query) | `/v1/embeddings` | Per-fact content + per-note markdown; for search, the user's free-text query |
+| **rag** (Vector demo Q&A) | `/v1/chat/completions` | User's question + top-K retrieved chunks (PHI verbatim) + optional chat history |
+| **audit row** | DB only | A row is written to `ai_outputs` for every call above (model, tokens, cost, latency, raw response). Stays local in Postgres — never re-sent outbound. |
+
+Embeddings stored in pgvector also contain the source text verbatim — that's
+how vector search returns snippets. If you back up Postgres, that backup
+contains PHI.
+
+### Where the data actually lands
+
+The endpoint matters more than the model name. Same model behind different
+providers means different jurisdictions, different retention policies,
+different contracts.
+
+| Provider | Host(s) | BAA available? | Notes |
+|---|---|---|---|
+| **mock** (default) | localhost only | n/a | No outbound calls. Safe for any data. |
+| **OpenAI** direct (`api.openai.com`) | US | Yes, on **OpenAI Enterprise/Healthcare**; **not** on standard tier | Standard tier inputs may be used to improve services unless you opt out; Enterprise is separately contracted. Always verify with OpenAI's current ToS. |
+| **OpenRouter** (`openrouter.ai`) | Routes to many upstreams (DeepInfra, Together, Novita, Z.AI, WandB, Google, AtlasCloud, …) | **No** | Each upstream has its own jurisdiction and policy. DeepSeek and GLM are usually served by Chinese-hosted providers. |
+| **Self-hosted** (vLLM, Ollama, llama.cpp on your network) | Your host | n/a — you're the operator | The compliance burden moves to you (encryption at rest, access control, audit), but no third-party PHI transfer occurs. |
+
+### Regulatory framing (informational — not legal advice)
+
+- **HIPAA (US)** — PHI sent to a third-party processor requires a signed
+  Business Associate Agreement (BAA). Inputs in the table above qualify as
+  PHI under §164.514. Sending PHI to a provider without a BAA is a reportable
+  breach.
+- **GDPR (EU/UK)** — Health data is "special category" under Art. 9. Lawful
+  basis (consent or Art. 9(2)(h) healthcare provision) plus an Art. 28
+  processor contract is required. Cross-border transfers (e.g. EU → US)
+  need an SCC + transfer impact assessment.
+- **PDPA (Thailand)** — Sensitive personal data under §26 requires explicit
+  consent. Cross-border transfer rules (§28) require adequate-protection
+  determinations or explicit consent. The sample data ships with Thai
+  clinical text — that's a deliberate signal that this codebase is built
+  with Thai healthcare in mind, and PDPA applies the moment real patients
+  are involved.
+
+### Mitigations to reach for before production-like use
+
+In rough order of how much they reduce risk:
+
+1. **Keep `AI_PROVIDER=mock`** for demos, screenshots, and conferences. The
+   mock provider produces deterministic output and never makes an outbound
+   call.
+2. **Self-host open-weight models.** The same `AI_PROVIDER=openai` code path
+   works against a local vLLM / Ollama server serving Llama, Qwen, DeepSeek
+   weights. PHI stays on your network. Cost and quality trade-offs apply.
+3. **Sign a BAA** with OpenAI (Healthcare/Enterprise) or Anthropic and pin
+   `AI_BASE_URL` to that tier. Other providers (OpenRouter, generic vendors)
+   are unsuitable for PHI in BAA-bound deployments.
+4. **De-identify before sending.** Remove the HIPAA Safe Harbor 18 (names,
+   geographic subdivisions smaller than state, dates more specific than year,
+   identifiers, …) before constructing the prompt. The data model can keep
+   the real values; only the LLM payload needs to be redacted. Out of scope
+   for this prototype — would live as a new `redact()` step inside
+   `gather_patient_facts` and the extract pre-processor.
+5. **Restrict to consented research/quality-improvement workflows** with
+   IRB/Ethics Committee approval and an explicit data-use agreement.
+6. **Encrypt the Postgres + Neo4j volumes at rest** and gate access with the
+   `BACKEND_API_KEY` middleware. The vector embeddings are PHI-derived even
+   though they're floating-point numbers, and the `content` column stores
+   the verbatim text.
+7. **Log + monitor every outbound call.** The existing `ai_outputs` table
+   is already an audit trail; just don't drop it. Add alerting for
+   unexpected providers / costs.
+
+### Current posture of this repository
+
+- Default `AI_PROVIDER=mock`, no outbound calls. Safe out of the box.
+- Sample data is **synthetic** (HN-DEMO-1 Somchai Sample) and crafted for
+  prototyping; it intentionally mixes Thai and English to exercise that
+  code path. It is NOT real patient data.
+- The active `.env.option.*` presets (`deepseek`, `gemini`, `hybrid`) all
+  route through **OpenRouter**, which does not offer BAAs. **Do not use any
+  preset with real patient data.**
+- No de-identification, no BAA enforcement, no provider allow-listing in
+  code. These are deliberate omissions for a prototype — they need to be
+  designed in before any deployment that touches a real EMR.
+
+If you're considering using this codebase against a real patient
+population, get a privacy/security review first. This README is documentation,
+not legal advice.

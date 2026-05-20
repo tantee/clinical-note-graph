@@ -18,6 +18,7 @@ from app.prompts.templates import (
     CODING_SUGGEST_SYSTEM,
     EXTRACTION_SYSTEM,
     EXTRACTION_USER,
+    RAG_SYSTEM,
     SUMMARY_SYSTEM,
     summary_system_for,
 )
@@ -26,7 +27,7 @@ from app.services.pricing import compute_cost, load_rates
 from app.services.runtime_config import effective as effective_settings
 
 
-CallType = Literal["extract", "summary", "coding", "embed"]
+CallType = Literal["extract", "summary", "coding", "embed", "rag"]
 
 
 @dataclass
@@ -50,6 +51,7 @@ _PROMPT_TEMPLATE_BY_CALL_TYPE = {
     "summary": "SUMMARY",
     "coding": "CODING_SUGGEST",
     "embed": "EMBED",
+    "rag": "RAG",
 }
 
 
@@ -141,6 +143,19 @@ class AIProvider(ABC):
         patient_id: str | None = None,
         ref_id: str | None = None,
     ) -> tuple[list[float], AICallRecord]:
+        ...
+
+    @abstractmethod
+    async def rag_ask(
+        self,
+        *,
+        question: str,
+        chunks: list[dict[str, Any]],
+        history: list[dict[str, str]] | None = None,
+        patient_id: str | None = None,
+    ) -> tuple[str, AICallRecord]:
+        """Compose a RAG answer given retrieved chunks and optional prior
+        chat history. Returns (markdown_answer, ai_call_record)."""
         ...
 
 
@@ -566,6 +581,42 @@ class MockProvider(AIProvider):
         _persist_ai_call(rec, valid=True, validation_errors=[])
         return vec, rec
 
+    async def rag_ask(
+        self,
+        *,
+        question: str,
+        chunks: list[dict[str, Any]],
+        history: list[dict[str, str]] | None = None,
+        patient_id: str | None = None,
+    ) -> tuple[str, AICallRecord]:
+        # Deterministic mock: cite [1] if there's at least one chunk,
+        # otherwise say no relevant excerpts.
+        if not chunks:
+            answer = "No relevant excerpts retrieved for this question."
+        else:
+            first_snippet = (chunks[0].get("content") or "")[:80]
+            answer = (
+                f"Based on the retrieved excerpts, the relevant information "
+                f"is: {first_snippet} [1].\n\n"
+                "_AI-assisted output — please verify against the source notes._"
+            )
+        rec = AICallRecord(
+            call_type="rag",
+            model="mock-rag",
+            prompt_tokens=_estimate_tokens(question + str(chunks)),
+            completion_tokens=_estimate_tokens(answer),
+            total_tokens=None,
+            latency_ms=1,
+            cost_usd=None,
+            raw_response={"mock": True, "answer": answer},
+            error=None,
+            job_id=None,
+            patient_id=patient_id,
+            document_id=None,
+        )
+        _persist_ai_call(rec, valid=True, validation_errors=[])
+        return answer, rec
+
 
 # ----------------------------- OPENAI-COMPATIBLE PROVIDER -----------------------------
 
@@ -800,6 +851,81 @@ class OpenAICompatibleProvider(AIProvider):
         )
         _persist_ai_call(rec, valid=True, validation_errors=[])
         return vec, rec
+
+    async def rag_ask(
+        self,
+        *,
+        question: str,
+        chunks: list[dict[str, Any]],
+        history: list[dict[str, str]] | None = None,
+        patient_id: str | None = None,
+    ) -> tuple[str, AICallRecord]:
+        system = RAG_SYSTEM
+        excerpts = "\n".join(
+            f"[{i + 1}] {(c.get('content') or '').strip()}"
+            for i, c in enumerate(chunks)
+        )
+        user = (
+            f"Question: {question}\n\n"
+            f"Relevant excerpts from this patient's notes:\n{excerpts}\n\n"
+            "Answer the question using ONLY the excerpts. Cite as [N]."
+        )
+
+        # Compose messages: system, then optional history, then the new user turn.
+        payload_messages: list[dict[str, Any]] = [{"role": "system", "content": system}]
+        if history:
+            for turn in history:
+                payload_messages.append({"role": turn["role"], "content": turn["content"]})
+        payload_messages.append({"role": "user", "content": user})
+
+        model = self._model_for("rag")
+        t0 = time.perf_counter()
+        payload: dict[str, Any] = {
+            "model": model,
+            "messages": payload_messages,
+            "temperature": 0.0,
+        }
+        if "openrouter.ai" in (self.base_url or ""):
+            payload["provider"] = {"ignore": ["WandB"], "allow_fallbacks": True}
+        async with httpx.AsyncClient(timeout=120) as client:
+            r = await client.post(
+                f"{self.base_url}/chat/completions",
+                json=payload, headers=self.headers,
+            )
+            r.raise_for_status()
+            data = r.json()
+        content = (data.get("choices") or [{}])[0].get("message", {}).get("content")
+        if not content:
+            raise RuntimeError(
+                f"Empty completion from {data.get('provider') or 'upstream'} for model={model}; "
+                f"finish_reason={(data.get('choices') or [{}])[0].get('finish_reason')!r}"
+            )
+        latency_ms = int((time.perf_counter() - t0) * 1000)
+        usage = data.get("usage") or {}
+        rec = AICallRecord(
+            call_type="rag",
+            model=model,
+            prompt_tokens=usage.get("prompt_tokens"),
+            completion_tokens=usage.get("completion_tokens"),
+            total_tokens=usage.get("total_tokens"),
+            latency_ms=latency_ms,
+            cost_usd=compute_cost(
+                load_rates(model),
+                prompt_tokens=usage.get("prompt_tokens") or 0,
+                completion_tokens=usage.get("completion_tokens") or 0,
+            ),
+            raw_response=data,
+            error=None,
+            job_id=None,
+            patient_id=patient_id,
+            document_id=None,
+        )
+        _persist_ai_call(rec, valid=True, validation_errors=[])
+        return content, rec
+
+
+# Alias for backwards-compatibility and plan sanity-check imports
+OpenAIProvider = OpenAICompatibleProvider
 
 
 def get_ai_provider(settings: Settings | None = None) -> AIProvider:

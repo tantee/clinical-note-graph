@@ -1,7 +1,10 @@
 import axios from 'axios'
 import { useUiStore } from '../stores/ui.js'
 
-const baseURL = import.meta.env.VITE_API_BASE || 'http://localhost:8000'
+// When VITE_API_BASE is set (typically a full URL for prod), use it.
+// Empty / unset → use relative '/api/...' so the page's origin (the Caddy proxy)
+// resolves the API host. Avoids cross-origin / CORS preflight on dev :8081.
+const baseURL = import.meta.env.VITE_API_BASE || ''
 
 export const api = axios.create({ baseURL, timeout: 120000 })
 
@@ -77,6 +80,10 @@ export const suggestEncounterCoding = (pid, eid, body) =>
   api.post(`/api/patient/${encodeURIComponent(pid)}/encounter/${encodeURIComponent(eid)}/coding/suggest`, body).then(data)
 export const getLatestEncounterCoding = (pid, eid) =>
   api.get(`/api/patient/${encodeURIComponent(pid)}/encounter/${encodeURIComponent(eid)}/coding/latest`).then(data)
+export const ragAsk = (body) =>
+  api.post('/api/rag/ask', body).then(data)
+export const searchPatientsByVector = (q, limit = 10, signal) =>
+  api.get('/api/search/patients', { params: { q, limit }, signal }).then(data)
 export const reviewFact = (factId, status) =>
   api.patch(`/api/facts/${factId}/review`, null, { params: { status } }).then(data)
 export const exportPatient = (body) => api.post('/api/export', body).then(data)

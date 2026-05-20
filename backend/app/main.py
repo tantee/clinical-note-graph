@@ -17,6 +17,7 @@ from app.routers import config as config_router
 from app.routers import debug as debug_router
 from app.routers import emr, export, jobs, patient
 from app.routers import encounter as encounter_router
+from app.routers import vector_demo as vector_demo_router
 from app.services.graph_updater import ensure_constraints
 from app.services.queue import start_workers, stop_workers
 
@@ -107,6 +108,7 @@ def create_app() -> FastAPI:
     app.include_router(export.router)
     app.include_router(jobs.router)
     app.include_router(debug_router.router)
+    app.include_router(vector_demo_router.router)
     return app
 
 

@@ -15,10 +15,16 @@
         </v-chip>
       </div>
       <v-spacer />
+      <!-- v-menu (root element of PatientSearchInput) doesn't have a DOM node
+           for the margin to land on, so wrap in a div with spacing classes. -->
+      <div class="d-none d-md-inline-flex mr-4">
+        <PatientSearchInput />
+      </div>
       <v-btn variant="text" to="/patients" prepend-icon="mdi-account-multiple-outline">Patients</v-btn>
       <v-btn variant="text" to="/ingest" prepend-icon="mdi-cloud-upload-outline">Ingest</v-btn>
       <v-btn variant="text" to="/config" prepend-icon="mdi-cog-outline">Config</v-btn>
       <v-btn variant="text" to="/debug" prepend-icon="mdi-chart-line-variant">Debug</v-btn>
+      <v-btn variant="text" to="/vector-demo" prepend-icon="mdi-database-search-outline">Vector</v-btn>
       <v-btn
         variant="text"
         :href="apiDocsUrl"
@@ -67,6 +73,7 @@
 <script setup>
 import { computed } from 'vue'
 import { useUiStore } from './stores/ui.js'
+import PatientSearchInput from './components/PatientSearchInput.vue'
 
 const ui = useUiStore()
 const apiDocsUrl = computed(() => (import.meta.env.VITE_API_BASE || 'http://localhost:8000') + '/docs')

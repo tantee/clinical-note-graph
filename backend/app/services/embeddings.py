@@ -105,7 +105,7 @@ async def vector_search(query: str, *, patient_id: str | None, limit: int = 10) 
         SELECT ref_type, ref_id, content, patient_id,
                1 - (embedding <=> CAST(:e AS vector)) AS similarity
         FROM embeddings
-        WHERE (:p IS NULL OR patient_id = :p)
+        WHERE (CAST(:p AS TEXT) IS NULL OR patient_id = :p)
         ORDER BY embedding <=> CAST(:e AS vector)
         LIMIT :lim
     """
