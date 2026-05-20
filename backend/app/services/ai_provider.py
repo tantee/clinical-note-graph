@@ -452,11 +452,33 @@ def mock_extract(content: str, *, patient_id: str, encounter_id: str | None, doc
     return result
 
 
+def _flatten_encounter_lists(patient_facts: dict[str, Any], key: str) -> list[dict[str, Any]]:
+    """Pull `key` from every raw_facts encounter and concatenate.
+
+    The hierarchical AI payload nests per-encounter buckets under
+    `encounters[*]`; the mock provider still wants a flat view to populate
+    its sample markdown / coding output. Production providers JSON-dump the
+    nested dict directly, so this helper is mock-only.
+    """
+    out: list[dict[str, Any]] = []
+    for enc in patient_facts.get("encounters") or []:
+        if enc.get("representation") == "raw_facts":
+            out.extend(enc.get(key) or [])
+    return out
+
+
 def _mock_summary_markdown(patient_facts: dict[str, Any], summary_type: str) -> str:
-    problems = patient_facts.get("problems", [])
-    meds = patient_facts.get("medications", [])
-    obs = patient_facts.get("observations", [])
-    plans = patient_facts.get("plans", [])
+    # Patient-level problems / medications come from the hierarchical payload's
+    # patient header; observations and plans are per-encounter so we walk the
+    # encounters[] list to surface them in the mock summary.
+    problems = patient_facts.get("chronicProblems") or patient_facts.get("problems") or []
+    meds = (
+        patient_facts.get("homeMedications")
+        or patient_facts.get("medications")
+        or _flatten_encounter_lists(patient_facts, "medications")
+    )
+    obs = patient_facts.get("observations") or _flatten_encounter_lists(patient_facts, "observations")
+    plans = patient_facts.get("plans") or _flatten_encounter_lists(patient_facts, "plans")
 
     lines = [f"# Patient Summary ({summary_type})", ""]
     if problems:
@@ -491,7 +513,15 @@ def _mock_suggest_coding(patient_facts: dict[str, Any], standards: list[str]) ->
     diagnoses = []
     candidates: list[dict[str, Any]] = []
     seen = set()
-    for f in patient_facts.get("problems", []):
+    # Source = patient-wide chronic problems (the hierarchical payload uses
+    # this key) with a fallback to the legacy "problems" name and any raw_facts
+    # encounter buckets, so the mock works against both shapes.
+    problem_rows: list[dict[str, Any]] = (
+        patient_facts.get("chronicProblems")
+        or patient_facts.get("problems")
+        or _flatten_encounter_lists(patient_facts, "problems")
+    )
+    for f in problem_rows:
         cond = f.get("value")
         if not cond or cond in seen:
             continue

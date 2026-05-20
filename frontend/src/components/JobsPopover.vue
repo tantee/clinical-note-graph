@@ -23,7 +23,10 @@
         >
           <v-icon>mdi-progress-clock</v-icon>
         </v-badge>
-        <v-icon v-else>mdi-progress-clock-outline</v-icon>
+        <!-- mdi-progress-clock-outline doesn't exist in the MDI set (see
+             https://pictogrammers.com/library/mdi/); use mdi-clock-outline
+             as the idle counterpart so the icon actually renders. -->
+        <v-icon v-else>mdi-clock-outline</v-icon>
       </v-btn>
     </template>
 

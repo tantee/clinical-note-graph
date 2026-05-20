@@ -351,6 +351,94 @@ def test_embed_redacts_input(monkeypatch, fake_store, isolated_vault):
 
 
 # ---------------------------------------------------------------------------
+# Hierarchical payload (gather_patient_facts_for_ai shape — issue #27 Part B)
+# ---------------------------------------------------------------------------
+
+
+def test_summarize_redacts_hierarchical_payload(monkeypatch, fake_store, isolated_vault):
+    """Compliance audit (#11 invariant) on the new compressed payload shape.
+
+    When an encounter has a persisted summary, gather_patient_facts_for_ai
+    ships its markdown body in place of the raw facts. The redactor must
+    still walk into that markdown and scrub PHI before the HTTP call lands.
+    """
+    from app.services.ai_provider import OpenAICompatibleProvider
+
+    _seed_pricing(fake_store)
+    captured: dict = {}
+    _stub_chat(monkeypatch, captured, "# Summary\n- ok")
+
+    settings = _make_settings()
+    p = OpenAICompatibleProvider(settings)
+
+    # Mirrors the gather_patient_facts_for_ai output: patient header +
+    # encounters list with both representations. PHI is planted in:
+    # - patient.name (PATIENT_NAME field)
+    # - chronicProblems[0].evidenceText (string body)
+    # - encounters[0].provider (PROVIDER_NAME field)
+    # - encounters[0].markdown (string body, collapsed-summary path)
+    # - encounters[1].problems[*].evidenceText (string body, raw_facts path)
+    facts = {
+        "patient": {
+            "patient_id": "HN-DEMO-1",
+            "name": "Somchai Sample",
+            "birth_date": "1962-03-04",
+        },
+        "allergies": [{"value": "Penicillin", "evidenceText": "told us at admit"}],
+        "chronicProblems": [
+            {"value": "Type 2 diabetes",
+             "evidenceText": "Somchai Sample, dx 2026-05-19"},
+        ],
+        "encounters": [
+            {
+                "encounterId": "E1", "type": "admission",
+                "dateTime": "2026-05-19T14:03",
+                "department": "IM", "provider": "Dr Anan Wong",
+                "representation": "summary",
+                "markdown": (
+                    "# Discharge summary\n"
+                    "- Somchai Sample (HN-DEMO-1)\n"
+                    "- Contact a@b.com on 2026-05-19\n"
+                    "- Seen by Dr Anan Wong"
+                ),
+            },
+            {
+                "encounterId": "E2", "type": "visit",
+                "dateTime": "2026-06-01T09:00",
+                "department": "OPD", "provider": "Dr Anan Wong",
+                "representation": "raw_facts",
+                "problems": [{
+                    "value": "Hyperglycemia",
+                    "evidenceText": "Somchai Sample seen 2026-06-01 by Dr Anan Wong",
+                }],
+                "medications": [], "observations": [], "procedures": [],
+                "plans": [], "diagnoses": [], "codingCandidates": [],
+            },
+        ],
+    }
+
+    md, rec = asyncio.run(p.summarize(
+        patient_facts=facts, summary_type="brief",
+        job_id=None, patient_id="HN-DEMO-1",
+    ))
+
+    _assert_no_phi_in_payload(captured["body"], phi_strings=[
+        "Somchai Sample",
+        "HN-DEMO-1",
+        "Anan Wong",
+        "a@b.com",
+        "1962-03-04",
+        "2026-05-19",
+        "2026-06-01",
+    ])
+    row = fake_store.ai_outputs[-1]
+    assert row["call_type"] == "summary"
+    assert row["deidentified"] is True
+    rc = row["redaction_counts"] or {}
+    assert sum(rc.values()) > 0, "expected at least one redaction on the compressed payload"
+
+
+# ---------------------------------------------------------------------------
 # rag_ask
 # ---------------------------------------------------------------------------
 
