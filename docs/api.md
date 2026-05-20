@@ -54,7 +54,7 @@ The full OpenAPI schema is at `http://localhost:8000/docs` (Swagger UI) and `/re
 | GET  | `/api/search?q=…&patientId=…` | Vector search across facts + notes for a patient. |
 | GET  | `/api/search/patients?q=…` | Vector search across the patient population (powers the global search bar). |
 | PATCH| `/api/facts/{factId}/review?status=` | Set `ai_suggested / human_confirmed / rejected`. |
-| POST | `/api/export` | Export `summary` · `coding` · `graph` · `markdown_vault` (zip) · `fhir_bundle` · `custom` (uses an export profile). |
+| POST | `/api/export` | Export `summary` · `coding` · `graph` · `markdown_vault` (zip) · `fhir_bundle` · `custom`. Every response also carries `vaultPath` — the bundle is mirrored to `patients/<HN>/exports/<name>-<ts>.<ext>`. See [Configuring export profiles](features.md#configuring-export-profiles) for the `custom` config shape. |
 
 ### Configuration
 
@@ -63,7 +63,7 @@ The full OpenAPI schema is at `http://localhost:8000/docs` (Swagger UI) and `/re
 | GET    | `/api/config` | Read effective settings (secrets masked). |
 | PATCH  | `/api/config` | Patch overrides (stored in `app_config`, merged on every read — no restart). |
 | GET    | `/api/config/export-profiles` | List export profiles. |
-| PUT    | `/api/config/export-profiles/{id}` | Upsert an export profile. |
+| PUT    | `/api/config/export-profiles/{id}` | Upsert an export profile. Body: `{profileId, name, config}`. Config keys: `fields[]`, `format` (`json`\|`markdown`), `includeEvidence`. See [Configuring export profiles](features.md#configuring-export-profiles). |
 | DELETE | `/api/config/export-profiles/{id}` | Remove an export profile. |
 | GET    | `/api/config/pricing` | List model pricing rates. |
 | PUT    | `/api/config/pricing/{model}` | Upsert one model rate. |

@@ -158,7 +158,7 @@ Both flows respect the de-identifier — the embedded text and the LLM payload a
 
 - **AI provider** — read the effective `AI_PROVIDER`, `AI_BASE_URL`, model overrides; click **Quick setup** for OpenRouter / OpenAI / Groq presets. Changes land in the `app_config` table — **no restart required** for runtime-overridable fields.
 - **Model pricing** — per-model `prompt_per_1m`, `completion_per_1m`, `embedding_per_1m` rates. Used to compute `cost_usd` on every AI call. **Refresh from OpenRouter** fetches current rates for every model present.
-- **Export profiles** — define what `POST /api/export` includes when the user picks `custom`. Each profile is a named JSON config.
+- **Export profiles** — define what `POST /api/export` returns when the user picks `custom`. See [Configuring export profiles](#configuring-export-profiles) below for the full config shape and examples.
 
 The Quick-setup dialog only fills the fields; you still review and click Save. Secrets are masked in `GET /api/config`.
 
@@ -198,7 +198,9 @@ Encounter-level summaries (one encounter only) use the same types and live at `P
 ### Where coding suggestions live
 
 - **Database** — every coding run is one row in the `patient_summaries` table (yes, the name is a misnomer; the table holds both summaries and coding) with `kind='coding'`. The row carries the full structured payload as JSONB, the model name, cost, and latency.
-- **Markdown vault** — encounter-scoped coding runs also drop a `coding/{date}.md` file into the patient's vault folder for side-by-side review in Obsidian.
+- **Markdown vault** — every coding run drops a markdown file alongside the DB row for side-by-side review in Obsidian:
+  - Encounter-scoped → `patients/<HN>/encounters/<eid>/coding.md` (overwritten on each run).
+  - Patient-level → `patients/<HN>/coding/patient-level-<timestamp>.md` (timestamped, never overwritten).
 - **API** — `GET /api/patient/{id}/coding/latest` returns the most recent patient-level run; `GET /api/patient/{id}/encounter/{eid}/coding/latest` returns the encounter-scoped one. Both are zero-AI-cost reads — the suggestion is cached until the user clicks Regenerate.
 
 To inspect via SQL:
@@ -219,6 +221,77 @@ Every fact row carries three states under `review_status`: `ai_suggested` (defau
 - Confirmed facts feed downstream summary / coding calls more reliably (the AI sees a "confirmed by clinician" flag).
 - Rejected facts are excluded from the graph by default (filter drawer → Review status to override).
 - The audit log records every status change with actor + timestamp.
+
+### Configuring export profiles
+
+Export profiles drive the `custom` branch of `POST /api/export`. Each profile is a row in the `export_profiles` table — `profile_id`, `name`, and a free-form JSONB `config` blob. The config is what `_run_custom_export` reads to decide which fact buckets to include and how to render them.
+
+#### Config schema
+
+| Key | Type | Default | What it does |
+|---|---|---|---|
+| `fields` | `string[]` | `["problems", "medications"]` | Which top-level buckets from `gather_patient_facts` to include. Allowed values: `problems`, `medications`, `observations`, `procedures`, `allergies`, `plans`, `diagnoses`, `codingCandidates`. Unknown names render as empty arrays. |
+| `format` | `"json"` \| `"markdown"` | `"json"` | `json` returns a raw dict keyed by `fields`. `markdown` renders one section per field with one bullet per item (uses `value`, falling back to `name`). |
+| `includeEvidence` | `bool` | `true` | Reserved for future use. Today every fact row carries `evidence_text` regardless — keep this `true` and the field is forward-compatible. |
+
+Anything else in the config is preserved verbatim on read but ignored by the renderer.
+
+#### List, create, update, delete
+
+| Verb | Path | Body |
+|---|---|---|
+| `GET` | `/api/config/export-profiles` | — |
+| `PUT` | `/api/config/export-profiles/<profile_id>` | `{ profileId, name, config }` (`profileId` in the body must match the path) |
+| `DELETE` | `/api/config/export-profiles/<profile_id>` | — |
+
+The default `default-summary` profile (`{ fields: ["problems", "medications"], format: "json", includeEvidence: true }`) is auto-seeded so the dropdown is never empty.
+
+#### Example: define a discharge-style markdown profile
+
+```bash
+curl -X PUT http://localhost:8080/api/config/export-profiles/discharge-bullet \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: $CNG_API_KEY" \
+  -d '{
+    "profileId": "discharge-bullet",
+    "name": "Discharge bullet (Markdown)",
+    "config": {
+      "fields": ["problems", "medications", "plans", "allergies"],
+      "format": "markdown",
+      "includeEvidence": true
+    }
+  }'
+```
+
+Then trigger an export using it:
+
+```bash
+curl -X POST http://localhost:8080/api/export \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: $CNG_API_KEY" \
+  -d '{
+    "patientId": "HN-DEMO-1",
+    "exportType": "custom",
+    "profileId": "discharge-bullet"
+  }'
+```
+
+The response carries `data` (the rendered markdown or JSON), `format`, `profile`, and `vaultPath`. Every successful export is mirrored into `patients/<HN>/exports/<profile-id>-<timestamp>.<ext>` so the patient's vault folder is a complete audit trail — `vaultPath` is the relative path you can open in Obsidian or hand back to the file picker.
+
+#### Built-in `exportType` values
+
+`custom` is one of six options. The others have fixed output and don't take a `profileId`:
+
+| `exportType` | Output `format` | Vault file extension |
+|---|---|---|
+| `summary` | `json+markdown` (rendered markdown + structured data fenced as JSON) | `.md` |
+| `coding` | `json` (CodingSuggestResponse) | `.json` |
+| `graph` | `json` (Neo4j subgraph for this patient) | `.json` |
+| `fhir_bundle` | `fhir` (HL7 FHIR Bundle) | `.json` |
+| `markdown_vault` | `zip-base64` (zip of the patient's vault folder) | `.zip` (real archive, not the base64 string) |
+| `custom` | depends on `profile.config.format` | `.md` or `.json` |
+
+For all of them, the response `vaultPath` points at the mirrored file under `patients/<HN>/exports/`.
 
 ### Cost tracking
 
