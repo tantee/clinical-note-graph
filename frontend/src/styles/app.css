@@ -48,10 +48,18 @@ pre.cng-raw.cng-raw-fill {
    and lets each card scroll its own body. Heights can't be expressed cleanly
    with Vuetify utility classes alone, so keep a single rule for the row.
    The cards themselves use d-flex flex-column h-100 + flex-grow-1 / overflow-y-auto
-   on inner sections — straight Vuetify v4 utility classes. */
+   on inner sections — straight Vuetify v4 utility classes.
+
+   The 320px offset accounts for: v-app-bar (56) + v-footer (~52 incl. padding)
+   + v-container.pa-6 (48) + patient header (~80) + v-tabs (48) + buffer (36).
+   Using 100dvh keeps mobile viewport-bar shrink from hiding the last row;
+   the @supports block falls back to 100vh on browsers without 100dvh. */
 .cng-emr-row {
-  height: calc(100vh - 260px);
+  height: calc(100dvh - 320px);
   min-height: 420px;
+}
+@supports not (height: 100dvh) {
+  .cng-emr-row { height: calc(100vh - 320px); }
 }
 
 .cng-markdown :deep(h1),

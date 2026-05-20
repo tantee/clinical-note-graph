@@ -131,9 +131,23 @@ const filters = reactive({
   reviewStatus: 'hide_rejected',
 })
 
-const emptyTitle = computed(() =>
-  props.scope === 'patient' ? 'No facts to display yet — ingest a note for this patient' :
-  'This encounter has no extracted facts')
+const emptyTitle = computed(() => {
+  if (props.scope !== 'patient') return 'This encounter has no extracted facts'
+  // Patient-scope empty state: tailor the message so the user knows which
+  // filter is producing zero results and how to recover.
+  if (scopeChip.value === 'latest') {
+    return encounterList.value.length
+      ? "Latest encounter has no graph data — try 'All' to see every encounter, or re-ingest if Overview shows facts (Neo4j upsert may have failed)."
+      : 'No encounters yet — ingest a note for this patient.'
+  }
+  if (scopeChip.value === 'pick') {
+    return pickedEncounterIds.value.length
+      ? "Selected encounters have no graph data — try 'All' or pick different encounters."
+      : "Pick at least one encounter to populate the graph."
+  }
+  // scopeChip === 'all'
+  return "No graph data — ingest a note for this patient. If facts already appear on Overview, the Neo4j upsert may have failed during ingest; re-ingest the document from the Documents list."
+})
 
 const filteredEncounterList = computed(() => {
   const q = pickerFilter.value.trim().toLowerCase()
