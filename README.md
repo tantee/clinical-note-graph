@@ -14,6 +14,21 @@ A Dockerised prototype that turns inbound EMR documents into:
 
 > ⚠️ **AI-assisted output requires clinical review.** No diagnosis or coding suggestion is ever marked as final.
 
+## User manual
+
+Screenshot-driven walkthrough of the running app — lives on the [project wiki](https://github.com/tantee/clinical-note-graph/wiki):
+
+| Page | What it covers |
+|---|---|
+| [Home](https://github.com/tantee/clinical-note-graph/wiki) | TOC + reading order |
+| [Getting started](https://github.com/tantee/clinical-note-graph/wiki/Getting-Started) | Landing page, top navigation, the patient list |
+| [Ingest an EMR](https://github.com/tantee/clinical-note-graph/wiki/Ingest) | Form, confirmation dialog, jobs popover |
+| [Patient detail](https://github.com/tantee/clinical-note-graph/wiki/Patient-Detail) | Overview / Timeline / Encounters / Notes / Graph / EMR-vs-facts / AI output |
+| [Config](https://github.com/tantee/clinical-note-graph/wiki/Config) | AI provider, model pricing, export profiles |
+| [Debug](https://github.com/tantee/clinical-note-graph/wiki/Debug) | Token spend, AI call log, background jobs |
+
+The wiki is the right starting point if you've just installed the stack and want to learn the UI. For deep reference (every option, every endpoint, every gotcha), use the `docs/` pages below.
+
 ## Documentation
 
 Ordered by reader intent. Each page tags its audience at the top.
