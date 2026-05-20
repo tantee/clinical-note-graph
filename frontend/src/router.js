@@ -9,11 +9,13 @@ import DebugView from './views/DebugView.vue'
 const routes = [
   { path: '/', redirect: '/patients' },
   { path: '/patients', component: PatientsView, name: 'patients' },
-  { path: '/patients/:id', component: PatientDetail, name: 'patient', props: true },
+  // Both /patients/:id (legacy plural) and /patient/:id (singular, matches the
+  // /patient/:id/encounter/:eid pattern below) resolve to PatientDetail.
+  { path: '/patients/:id', alias: '/patient/:id', component: PatientDetail, name: 'patient', props: true },
   {
     path: '/patient/:id/encounter/:eid',
     name: 'encounter',
-    component: () => import('./views/EncounterDetail.vue'),
+    component: PatientDetail,
     props: true,
   },
   {

@@ -268,63 +268,233 @@ def _jsonable(value: Any) -> Any:
 
 
 def fetch_patient_graph(patient_id: str) -> dict[str, Any]:
-    rows = run_cypher(
-        """
-        MATCH (p:Patient {patientId: $pid})
-        OPTIONAL MATCH (p)-[:HAS_ENCOUNTER]->(e:Encounter)
-        OPTIONAL MATCH (e)-[:HAS_DOCUMENT]->(d:Document)
-        OPTIONAL MATCH (e)-[:MENTIONS]->(c:Condition)
-        OPTIONAL MATCH (e)-[:HAS_OBSERVATION]->(o:Observation)
-        OPTIONAL MATCH (e)-[:PRESCRIBED]->(m:Medication)
-        OPTIONAL MATCH (e)-[:HAS_PLAN]->(pl:Plan)
-        OPTIONAL MATCH (p)-[:HAS_ALLERGY]->(a:Allergy)
-        RETURN p, collect(DISTINCT e) AS encounters, collect(DISTINCT d) AS docs,
-               collect(DISTINCT c) AS conditions, collect(DISTINCT o) AS observations,
-               collect(DISTINCT m) AS medications, collect(DISTINCT pl) AS plans,
-               collect(DISTINCT a) AS allergies
-        """,
-        {"pid": patient_id},
+    """Legacy entry point — equivalent to fetch_graph(patient_id) with the
+    default patient-level parameters. Kept so existing callers don't break."""
+    return fetch_graph(patient_id)
+
+
+def fetch_graph(
+    patient_id: str,
+    *,
+    scope: str = "patient",
+    encounter_ids: list[str] | None = None,
+    dedupe: bool | None = None,
+    include_encounters: bool | None = None,
+    include_documents: bool = False,
+    review_status: str = "hide_rejected",
+) -> dict[str, Any]:
+    """Build the subgraph for the requested scope.
+
+    Defaults:
+      scope="patient"        → dedupe=True, include_encounters=False
+      scope in {"encounter", "encounters"} →
+                             dedupe=True if len(encounter_ids)>1 else False,
+                             include_encounters=True
+    """
+    if scope not in ("patient", "encounter", "encounters"):
+        raise ValueError(f"unknown scope {scope!r}")
+    encounter_ids = encounter_ids or []
+    if scope in ("encounter", "encounters") and not encounter_ids:
+        raise ValueError("encounter_ids required when scope is encounter or encounters")
+    if include_encounters is None:
+        include_encounters = scope != "patient"
+    if dedupe is None:
+        dedupe = scope == "patient" or len(encounter_ids) > 1
+
+    cypher, params = _graph_cypher(
+        patient_id, scope, encounter_ids,
+        include_documents=include_documents, review_status=review_status,
     )
+    rows = run_cypher(cypher, params)
     if not rows:
         return {"nodes": [], "edges": []}
-    row = rows[0]
+    graph = _materialize_rows(rows[0], include_encounters=include_encounters,
+                              include_documents=include_documents)
+    if dedupe:
+        graph = _dedupe_nodes_edges(graph)
+    return graph
+
+
+def _graph_cypher(
+    patient_id: str, scope: str, encounter_ids: list[str],
+    *, include_documents: bool, review_status: str,
+) -> tuple[str, dict[str, Any]]:
+    """Build a single Cypher query with parameters. Filters facts by
+    review_status via a Cypher WHERE clause on each OPTIONAL MATCH."""
+    fact_filter = ""
+    if review_status == "hide_rejected":
+        fact_filter = " WHERE coalesce(n.reviewStatus, 'ai_suggested') <> 'rejected'"
+    elif review_status == "confirmed":
+        fact_filter = " WHERE n.reviewStatus = 'human_confirmed'"
+    # 'all' → no filter
+
+    enc_match = "MATCH (p)-[:HAS_ENCOUNTER]->(e:Encounter)"
+    if scope in ("encounter", "encounters"):
+        enc_match += " WHERE e.encounterId IN $eids"
+
+    parts = [
+        "MATCH (p:Patient {patientId: $pid})",
+        enc_match,
+        "OPTIONAL MATCH (e)-[:MENTIONS]->(c:Condition)" + fact_filter.replace("n.", "c."),
+        "OPTIONAL MATCH (e)-[:HAS_OBSERVATION]->(o:Observation)" + fact_filter.replace("n.", "o."),
+        "OPTIONAL MATCH (e)-[:PRESCRIBED]->(m:Medication)" + fact_filter.replace("n.", "m."),
+        "OPTIONAL MATCH (e)-[:HAS_PLAN]->(pl:Plan)" + fact_filter.replace("n.", "pl."),
+        "OPTIONAL MATCH (p)-[:HAS_ALLERGY]->(a:Allergy)" + fact_filter.replace("n.", "a."),
+    ]
+    if include_documents:
+        parts.append("OPTIONAL MATCH (e)-[:HAS_DOCUMENT]->(d:Document)")
+
+    parts.append(
+        "RETURN p, "
+        "collect(DISTINCT e) AS encounters, "
+        + ("collect(DISTINCT d) AS docs, " if include_documents else "")
+        + "collect(DISTINCT c) AS conditions, "
+        "collect(DISTINCT o) AS observations, "
+        "collect(DISTINCT m) AS medications, "
+        "collect(DISTINCT pl) AS plans, "
+        "collect(DISTINCT a) AS allergies"
+    )
+    cypher = "\n        ".join(parts)
+    return cypher, {"pid": patient_id, "eids": encounter_ids}
+
+
+def _materialize_rows(row: dict[str, Any], *, include_encounters: bool,
+                      include_documents: bool) -> dict[str, Any]:
+    """Convert a single Cypher row into the {nodes, edges} response shape.
+
+    Uses encounter-aware node ids (Condition:val:e<eid>) so the dedupe step
+    can find duplicates that came from different encounters."""
     nodes: list[dict[str, Any]] = []
     edges: list[dict[str, Any]] = []
     seen: set[str] = set()
 
-    def add(label: str, item: dict[str, Any], key: str) -> str | None:
+    def add(label: str, item: dict[str, Any], natural_key: str, source_eid: str | None = None) -> str | None:
         if not item:
             return None
         clean = _jsonable(item)
-        nid = f"{label}:{clean.get(key)}"
+        suffix = f":{source_eid}" if source_eid else ""
+        nid = f"{label}:{clean.get(natural_key)}{suffix}"
         if nid not in seen:
             seen.add(nid)
             nodes.append({"id": nid, "label": label, "data": clean})
         return nid
 
     pid = add("Patient", row["p"], "patientId")
-    for e in row["encounters"]:
-        eid = add("Encounter", e, "encounterId")
-        if pid and eid:
-            edges.append({"from": pid, "to": eid, "type": "HAS_ENCOUNTER"})
-    for c in row["conditions"]:
-        cid = add("Condition", c, "value")
-        if pid and cid:
-            edges.append({"from": pid, "to": cid, "type": "HAS_CONDITION"})
-    for m in row["medications"]:
-        mid = add("Medication", m, "name")
-        if pid and mid:
-            edges.append({"from": pid, "to": mid, "type": "ON_MEDICATION"})
-    for o in row["observations"]:
-        oid = add("Observation", o, "name")
-        if pid and oid:
-            edges.append({"from": pid, "to": oid, "type": "HAS_OBSERVATION"})
-    for pl in row["plans"]:
-        plid = add("Plan", pl, "description")
-        if pid and plid:
-            edges.append({"from": pid, "to": plid, "type": "HAS_PLAN"})
-    for a in row["allergies"]:
+    enc_ids: dict[str, str] = {}  # encounterId → node id
+    for e in (row.get("encounters") or []):
+        if not e:
+            continue
+        eid_str = (e.get("encounterId") or "")
+        if include_encounters:
+            enc_node_id = add("Encounter", e, "encounterId")
+        else:
+            # Build enc_ids for fact-attachment lookup without emitting the node.
+            clean = _jsonable(e)
+            enc_node_id = f"Encounter:{clean.get('encounterId')}"
+        if enc_node_id is None:
+            continue
+        enc_ids[eid_str] = enc_node_id
+        if include_encounters and pid:
+            edges.append({"from": pid, "to": enc_node_id, "type": "HAS_ENCOUNTER"})
+
+    # Facts. Each fact carries `encounterId` when known so its id is unique
+    # per encounter; the dedupe pass collapses by clinical key afterwards.
+    def fact_eid(f: dict[str, Any]) -> str | None:
+        return f.get("encounterId") if f else None
+
+    for c in (row.get("conditions") or []):
+        cid = add("Condition", c, "value", source_eid=fact_eid(c))
+        if cid:
+            attach_from = enc_ids.get(fact_eid(c)) if include_encounters else pid
+            if attach_from:
+                edges.append({"from": attach_from, "to": cid, "type": "HAS_CONDITION"})
+    for m in (row.get("medications") or []):
+        mid = add("Medication", m, "name", source_eid=fact_eid(m))
+        if mid:
+            attach_from = enc_ids.get(fact_eid(m)) if include_encounters else pid
+            if attach_from:
+                edges.append({"from": attach_from, "to": mid, "type": "ON_MEDICATION"})
+    for o in (row.get("observations") or []):
+        oid = add("Observation", o, "name", source_eid=fact_eid(o))
+        if oid:
+            attach_from = enc_ids.get(fact_eid(o)) if include_encounters else pid
+            if attach_from:
+                edges.append({"from": attach_from, "to": oid, "type": "HAS_OBSERVATION"})
+    for pl in (row.get("plans") or []):
+        plid = add("Plan", pl, "description", source_eid=fact_eid(pl))
+        if plid:
+            attach_from = enc_ids.get(fact_eid(pl)) if include_encounters else pid
+            if attach_from:
+                edges.append({"from": attach_from, "to": plid, "type": "HAS_PLAN"})
+    for a in (row.get("allergies") or []):
         aid = add("Allergy", a, "value")
-        if pid and aid:
+        if aid and pid:
             edges.append({"from": pid, "to": aid, "type": "HAS_ALLERGY"})
+
+    if include_documents:
+        for d in (row.get("docs") or []):
+            did = add("Document", d, "documentId")
+            if did:
+                eid_attach = enc_ids.get(d.get("encounterId")) if include_encounters else pid
+                if eid_attach:
+                    edges.append({"from": eid_attach, "to": did, "type": "HAS_DOCUMENT"})
+
+    # Strip the encounter-suffix off node ids when we don't need it
+    # (i.e., when encounters aren't included, facts come from patient directly).
+    # The dedupe pass will collapse all same-key facts anyway, so suffix is
+    # only meaningful pre-dedupe. Leave the suffix; dedupe handles it.
     return {"nodes": nodes, "edges": edges}
+
+
+def _dedupe_key(node: dict[str, Any]) -> tuple | None:
+    """Return a hashable dedupe key, or None for node labels we don't dedupe.
+
+    Conditions: collapse by normalized_code; fall back to lowercased value.
+    Medications: collapse by rxNorm; fall back to lowercased name. A different
+        rxNorm for the same generic name stays separate (different formulations).
+    Allergies: same rule as Conditions.
+    Observations: NOT deduped — same name at different times is informative.
+    Documents / Plans / Procedures / Patient / Encounter: pass through.
+    """
+    label = node.get("label")
+    data = node.get("data") or {}
+    if label == "Condition":
+        return ("Condition", data.get("normalized_code") or str(data.get("value", "")).casefold())
+    if label == "Medication":
+        return ("Medication", data.get("rxNorm") or str(data.get("name", "")).casefold())
+    if label == "Allergy":
+        return ("Allergy", data.get("normalized_code") or str(data.get("value", "")).casefold())
+    return None
+
+
+def _dedupe_nodes_edges(graph: dict[str, Any]) -> dict[str, Any]:
+    """Collapse duplicate fact nodes across encounters; rewrite edges to the
+    surviving node id. Pure function — does NOT touch the network/Neo4j."""
+    nodes = graph.get("nodes") or []
+    edges = graph.get("edges") or []
+
+    canonical_id_by_key: dict[tuple, str] = {}
+    id_remap: dict[str, str] = {}
+    kept_nodes: list[dict[str, Any]] = []
+
+    for node in nodes:
+        key = _dedupe_key(node)
+        if key is None:
+            kept_nodes.append(node)
+            continue
+        canonical = canonical_id_by_key.get(key)
+        if canonical is None:
+            canonical_id_by_key[key] = node["id"]
+            kept_nodes.append(node)
+        else:
+            id_remap[node["id"]] = canonical  # drop this node; rewrite its inbound edges
+
+    rewritten_edges: list[dict[str, Any]] = []
+    for edge in edges:
+        rewritten_edges.append({
+            **edge,
+            "from": id_remap.get(edge["from"], edge["from"]),
+            "to": id_remap.get(edge["to"], edge["to"]),
+        })
+
+    return {"nodes": kept_nodes, "edges": rewritten_edges}
