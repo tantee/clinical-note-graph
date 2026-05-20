@@ -118,7 +118,7 @@ def save_summary(
             {
                 "pid": patient_id, "tp": summary_type, "eid": encounter_id,
                 "mdl": model, "md": markdown,
-                "ev": json.dumps(evidence) if evidence is not None else None,
+                "ev": json.dumps(evidence, default=str) if evidence is not None else None,
                 "cost": cost_usd, "lat": latency_ms, "vp": rel_path,
             },
         ).mappings().first()

@@ -63,3 +63,29 @@ def test_patient_level_summary_does_not_leak_into_encounter_latest(app_client, f
     r = app_client.get("/api/patient/HN1/encounter/E1/summary/latest")
     assert r.status_code == 200
     assert r.json() is None  # no encounter-scoped row exists yet
+
+
+def test_summary_evidence_with_date_objects_serializes(app_client, fake_store):
+    """Regression for the e2e failure observed on main after PR #11:
+
+        TypeError: Object of type date is not JSON serializable
+
+    The patient_facts dict carries `birth_date` as a `datetime.date` straight
+    from the Postgres row; `save_summary` JSON-encodes it for the `evidence`
+    JSONB column. The encoder must tolerate dates (and datetimes) by falling
+    back to str, the same way save_coding already does for its payload.
+    """
+    from datetime import date
+
+    _seed(fake_store)
+    # The patient row that gather_patient_facts builds carries `birth_date`
+    # straight from Postgres — that's a `datetime.date`, not a string.
+    fake_store.patients["HN1"]["birth_date"] = date(1965, 4, 12)
+
+    r = app_client.post(
+        "/api/patient/HN1/summary",
+        # includeEvidence=True is the path that puts patient_facts into the
+        # `evidence` column and trips the encoder.
+        json={"type": "brief", "includeEvidence": True},
+    )
+    assert r.status_code == 200, r.text
