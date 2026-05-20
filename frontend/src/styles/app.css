@@ -53,24 +53,6 @@ pre.cng-raw.cng-raw-fill {
   padding-bottom: 64px;
 }
 
-/* Three-column EMR-vs-facts row: fills the visible viewport below the tabs
-   and lets each card scroll its own body. Heights can't be expressed cleanly
-   with Vuetify utility classes alone, so keep a single rule for the row.
-   The cards themselves use d-flex flex-column h-100 + flex-grow-1 / overflow-y-auto
-   on inner sections — straight Vuetify v4 utility classes.
-
-   Offset covers: v-app-bar (~64) + v-main padding-bottom (64, see above)
-   + v-container.pa-6 (48) + patient header (~80) + v-tabs (48) + buffer.
-   100dvh handles the mobile address-bar shrink; @supports falls back to
-   100vh on browsers that lack 100dvh. */
-.cng-emr-row {
-  height: calc(100dvh - 360px);
-  min-height: 420px;
-}
-@supports not (height: 100dvh) {
-  .cng-emr-row { height: calc(100vh - 360px); }
-}
-
 .cng-markdown :deep(h1),
 .cng-markdown :deep(h2),
 .cng-markdown :deep(h3) { margin-top: 1em; margin-bottom: 0.35em; }

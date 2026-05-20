@@ -180,14 +180,20 @@
         <GraphView :patient-id="props.id" :height="640" />
       </v-window-item>
 
-      <!-- Raw EMR vs facts -->
+      <!-- Raw EMR vs facts.
+           Earlier this used a fixed-height (`.cng-emr-row`) row with per-
+           column internal scroll. That looked clever but broke the user's
+           mental model: they expected the page to scroll the way Overview
+           does. Now each card sizes to its own content and the page scrolls
+           naturally. The Documents column is short; Raw EMR + Extracted
+           facts can grow tall, and the user scrolls down to see them. -->
       <v-window-item value="raw">
-        <v-row class="cng-emr-row">
-          <v-col cols="12" md="3" class="d-flex">
-            <v-card class="d-flex flex-column flex-grow-1 overflow-hidden">
+        <v-row>
+          <v-col cols="12" md="3">
+            <v-card>
               <SectionHeader title="Documents" icon="mdi-file-multiple-outline" />
               <v-divider />
-              <v-list density="compact" nav class="flex-grow-1 overflow-y-auto" style="min-height: 0;">
+              <v-list density="compact" nav>
                 <v-list-item
                   v-for="d in encounterDocuments"
                   :key="d.document_id"
@@ -200,18 +206,18 @@
               </v-list>
             </v-card>
           </v-col>
-          <v-col cols="12" md="4" class="d-flex">
-            <v-card class="d-flex flex-column flex-grow-1 overflow-hidden">
+          <v-col cols="12" md="4">
+            <v-card>
               <SectionHeader title="Raw EMR" icon="mdi-text-box-outline" />
               <v-divider />
-              <v-card-text class="flex-grow-1 overflow-y-auto" style="min-height: 0;">
+              <v-card-text>
                 <pre v-if="selectedDocument?.document?.raw_content" class="cng-raw cng-raw-fill">{{ selectedDocument.document.raw_content }}</pre>
                 <EmptyState v-else icon="mdi-text-box-outline" title="No document selected" />
               </v-card-text>
             </v-card>
           </v-col>
-          <v-col cols="12" md="5" class="d-flex">
-            <v-card class="d-flex flex-column flex-grow-1 overflow-hidden">
+          <v-col cols="12" md="5">
+            <v-card>
               <SectionHeader title="Extracted facts" icon="mdi-format-list-bulleted-square">
                 <template #actions>
                   <v-chip size="x-small" variant="tonal" v-if="selectedDocument?.facts?.length">
@@ -220,12 +226,7 @@
                 </template>
               </SectionHeader>
               <v-divider />
-              <!-- overflow-y: scroll keeps the scrollbar gutter reserved so
-                   the column doesn't look like it's missing content on macOS
-                   (where `overflow-y: auto` hides the scrollbar until the
-                   user hovers / drags). The fact count chip above tells the
-                   user up-front how many items they're scrolling through. -->
-              <v-list density="comfortable" class="flex-grow-1" style="min-height: 0; overflow-y: scroll;">
+              <v-list density="comfortable">
                 <v-list-item v-for="f in selectedDocument?.facts || []" :key="f.id" :title="f.value">
                   <template #prepend>
                     <v-icon :color="FACT_TYPE_META[f.type]?.color || 'grey'">{{ FACT_TYPE_META[f.type]?.icon || 'mdi-circle-medium' }}</v-icon>
@@ -435,12 +436,41 @@ async function revealCard(cardRef) {
   if (el?.scrollIntoView) el.scrollIntoView({ behavior: 'smooth', block: 'start' })
 }
 
+// Reasoning AI models (DeepSeek R1, GPT-5-mini with reasoning) can take
+// 3-5 minutes on patients with many facts. The backend persists the
+// result before returning; if the HTTP call drops mid-flight for any
+// reason (network blip, axios timeout, tab backgrounded), the saved
+// result is still recoverable via the corresponding /latest endpoint.
+// Refetch on failure so the user sees what was saved instead of a
+// perpetually-spinning button.
+async function recoverFromAiFailure(loader, name) {
+  try {
+    const latest = await loader()
+    if (latest) {
+      ui.warning(`${name} call ran past the client timeout, but the saved result is ready below.`)
+      return latest
+    }
+  } catch {
+    // fall through to the error toast
+  }
+  ui.error(`${name} call failed and no saved result was found. Check Debug → AI calls.`)
+  return null
+}
+
 async function loadSummary() {
   busy.summary = true
   try {
     summary.value = await summarize(props.id, { type: 'detailed', includeEvidence: true })
     ui.success('Summary ready')
     await revealCard(summaryCard)
+  } catch (err) {
+    if (err?.name !== 'CanceledError' && err?.code !== 'ERR_CANCELED') {
+      const recovered = await recoverFromAiFailure(() => getLatestSummary(props.id), 'Summary')
+      if (recovered) {
+        summary.value = recovered
+        await revealCard(summaryCard)
+      }
+    }
   } finally { busy.summary = false }
 }
 async function loadCoding() {
@@ -449,6 +479,17 @@ async function loadCoding() {
     codingResp.value = await suggestCoding(props.id, { standards: ['ICD10', 'SNOMEDCT'], includeEvidence: true })
     ui.success('Coding suggestion ready')
     await revealCard(codingCard)
+  } catch (err) {
+    if (err?.name !== 'CanceledError' && err?.code !== 'ERR_CANCELED') {
+      const recovered = await recoverFromAiFailure(
+        async () => (await getLatestCoding(props.id))?.payload || null,
+        'Coding',
+      )
+      if (recovered) {
+        codingResp.value = recovered
+        await revealCard(codingCard)
+      }
+    }
   } finally { busy.coding = false }
 }
 

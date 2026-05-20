@@ -91,26 +91,35 @@ export const patchConfig = (patch) => api.patch('/api/config', patch).then(data)
 export const listExportProfiles = () => api.get('/api/config/export-profiles').then(data)
 export const upsertExportProfile = (p) =>
   api.put(`/api/config/export-profiles/${encodeURIComponent(p.profileId)}`, p).then(data)
+// AI generation calls (summary, coding, RAG) bypass the default 120 s
+// timeout because reasoning models (DeepSeek R1, GPT-5-mini in reasoning
+// mode) routinely take 3-5 minutes on patients with many facts. A short
+// timeout means axios abandons the request while the backend continues
+// and persists the result — the user sees a perpetually-loading button
+// and can't tell the result was actually saved. 6 minutes is the cap we
+// give the user before bailing out for real.
+const AI_GEN_TIMEOUT_MS = 360_000
+
 export const summarize = (id, body) =>
-  api.post(`/api/patient/${encodeURIComponent(id)}/summary`, body).then(data)
+  api.post(`/api/patient/${encodeURIComponent(id)}/summary`, body, { timeout: AI_GEN_TIMEOUT_MS }).then(data)
 export const getLatestSummary = (id) =>
   api.get(`/api/patient/${encodeURIComponent(id)}/summary/latest`).then(data)
 export const suggestCoding = (id, body) =>
-  api.post(`/api/patient/${encodeURIComponent(id)}/coding/suggest`, body).then(data)
+  api.post(`/api/patient/${encodeURIComponent(id)}/coding/suggest`, body, { timeout: AI_GEN_TIMEOUT_MS }).then(data)
 export const getLatestCoding = (id) =>
   api.get(`/api/patient/${encodeURIComponent(id)}/coding/latest`).then(data)
 export const listEncounters = (id) =>
   api.get(`/api/patient/${encodeURIComponent(id)}/encounters`).then(data)
 export const summarizeEncounter = (pid, eid, body) =>
-  api.post(`/api/patient/${encodeURIComponent(pid)}/encounter/${encodeURIComponent(eid)}/summary`, body).then(data)
+  api.post(`/api/patient/${encodeURIComponent(pid)}/encounter/${encodeURIComponent(eid)}/summary`, body, { timeout: AI_GEN_TIMEOUT_MS }).then(data)
 export const getLatestEncounterSummary = (pid, eid) =>
   api.get(`/api/patient/${encodeURIComponent(pid)}/encounter/${encodeURIComponent(eid)}/summary/latest`).then(data)
 export const suggestEncounterCoding = (pid, eid, body) =>
-  api.post(`/api/patient/${encodeURIComponent(pid)}/encounter/${encodeURIComponent(eid)}/coding/suggest`, body).then(data)
+  api.post(`/api/patient/${encodeURIComponent(pid)}/encounter/${encodeURIComponent(eid)}/coding/suggest`, body, { timeout: AI_GEN_TIMEOUT_MS }).then(data)
 export const getLatestEncounterCoding = (pid, eid) =>
   api.get(`/api/patient/${encodeURIComponent(pid)}/encounter/${encodeURIComponent(eid)}/coding/latest`).then(data)
 export const ragAsk = (body) =>
-  api.post('/api/rag/ask', body).then(data)
+  api.post('/api/rag/ask', body, { timeout: AI_GEN_TIMEOUT_MS }).then(data)
 export const searchPatientsByVector = (q, limit = 10, signal) =>
   api.get('/api/search/patients', { params: { q, limit }, signal }).then(data)
 export const reviewFact = (factId, status) =>
