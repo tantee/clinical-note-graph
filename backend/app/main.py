@@ -40,6 +40,15 @@ async def lifespan(app: FastAPI):
     if last_err is not None:
         logger.warning("Neo4j constraints not initialised at startup: %s", last_err)
 
+    # Pre-load Presidio / PyThaiNLP NER pipelines if DEIDENTIFY_LEVEL=safe_harbor
+    # so the first AI call doesn't eat the model-load cost (Issue #10 perf budget).
+    if (getattr(settings, "DEIDENTIFY_LEVEL", "") or "").lower() == "safe_harbor":
+        try:
+            from app.services.deidentify import warm_up as _deid_warm
+            await asyncio.to_thread(_deid_warm)
+        except Exception as exc:
+            logger.warning("De-identifier warm-up failed: %s", exc)
+
     workers = start_workers()
     try:
         yield

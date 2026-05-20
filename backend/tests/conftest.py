@@ -181,6 +181,14 @@ class FakeStore:
             rows.sort(key=lambda r: r["created_at"], reverse=True)
             return FakeResult(rows[:1])
         if s.startswith("insert into ai_outputs"):
+            rc_raw = params.get("redaction_counts")
+            if isinstance(rc_raw, str):
+                try:
+                    rc = json.loads(rc_raw)
+                except (TypeError, ValueError):
+                    rc = None
+            else:
+                rc = rc_raw
             self.ai_outputs.append({
                 "id": f"ai-{len(self.ai_outputs)}",
                 "document_id": params.get("d"), "patient_id": params.get("p"),
@@ -196,6 +204,8 @@ class FakeStore:
                 "latency_ms": params.get("latency_ms"),
                 "cost_usd": params.get("cost_usd"),
                 "error": params.get("err"),
+                "deidentified": bool(params.get("deidentified", False)),
+                "redaction_counts": rc,
                 "created_at": "now",
             })
             return FakeResult([])

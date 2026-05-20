@@ -23,8 +23,38 @@ from app.prompts.templates import (
     summary_system_for,
 )
 from app.schemas.extraction import ClinicalExtractionResult
+from app.services.deidentify import Deidentifier, for_settings as deidentifier_for
 from app.services.pricing import compute_cost, load_rates
 from app.services.runtime_config import effective as effective_settings
+
+
+def _provider_label(base_url: str) -> str:
+    """Coarse provider label for log lines — `openrouter`, `openai`, or `custom`."""
+    b = (base_url or "").lower()
+    if "openrouter.ai" in b:
+        return "openrouter"
+    if "api.openai.com" in b:
+        return "openai"
+    if "anthropic" in b:
+        return "anthropic"
+    return "custom"
+
+
+def _log_redaction(call_type: str, provider: str, deid: "Deidentifier") -> None:
+    """Emit a single log line per call summarising what got redacted, e.g.
+    `redacted_categories=PERSON:2,EMAIL_ADDRESS:1 ai_provider=openrouter call_type=extract`.
+    """
+    counts = deid.counts_snapshot()
+    if not counts:
+        return
+    summary = ",".join(f"{k}:{v}" for k, v in sorted(counts.items()))
+    log_msg = (
+        f"redacted_categories={summary} ai_provider={provider} call_type={call_type}"
+    )
+    # Reuse the module logger via stdlib logging so the audit-trail line is
+    # consistent with the rest of the backend.
+    import logging
+    logging.getLogger("app.services.ai_provider").info(log_msg)
 
 
 CallType = Literal["extract", "summary", "coding", "embed", "rag"]
@@ -55,7 +85,14 @@ _PROMPT_TEMPLATE_BY_CALL_TYPE = {
 }
 
 
-def _persist_ai_call(rec: AICallRecord, *, valid: bool, validation_errors: list) -> None:
+def _persist_ai_call(
+    rec: AICallRecord,
+    *,
+    valid: bool,
+    validation_errors: list,
+    deidentified: bool = False,
+    redaction_counts: dict | None = None,
+) -> None:
     """Persist one AI provider call into ai_outputs with all metering columns."""
     with db_session() as s:
         s.execute(
@@ -64,11 +101,13 @@ def _persist_ai_call(rec: AICallRecord, *, valid: bool, validation_errors: list)
                 INSERT INTO ai_outputs
                   (document_id, patient_id, job_id, prompt_template, model, raw_output,
                    valid, validation_errors, call_type, prompt_tokens, completion_tokens,
-                   total_tokens, latency_ms, cost_usd, error)
+                   total_tokens, latency_ms, cost_usd, error,
+                   deidentified, redaction_counts)
                 VALUES
                   (:d, :p, :job_id, :pt, :m, CAST(:r AS jsonb),
                    :v, CAST(:e AS jsonb), :call_type, :prompt_tokens, :completion_tokens,
-                   :total_tokens, :latency_ms, :cost_usd, :err)
+                   :total_tokens, :latency_ms, :cost_usd, :err,
+                   :deidentified, CAST(:redaction_counts AS jsonb))
                 """
             ),
             {
@@ -87,6 +126,8 @@ def _persist_ai_call(rec: AICallRecord, *, valid: bool, validation_errors: list)
                 "latency_ms": rec.latency_ms,
                 "cost_usd": str(rec.cost_usd) if rec.cost_usd is not None else None,
                 "err": rec.error,
+                "deidentified": bool(deidentified),
+                "redaction_counts": j(redaction_counts) if redaction_counts else None,
             },
         )
 
@@ -684,15 +725,22 @@ class OpenAICompatibleProvider(AIProvider):
         content: str,
         job_id: str | None = None,
     ) -> tuple[dict[str, Any], AICallRecord]:
+        deid = deidentifier_for(self.settings)
+        # Pseudonymise the patient ID first so the same token appears in both
+        # the prompt scaffold and the embedded narrative.
+        safe_patient_id = deid.pseudonym_for(patient_id, "HN") if not deid.disabled() else patient_id
+        safe_encounter_dt = deid.pseudonymize_facts({"encounter_dt": encounter_dt})["encounter_dt"]
+        safe_content = deid.redact_text(content, lang="auto")
+
         system = EXTRACTION_SYSTEM + "\n\nSchema:\n" + json.dumps(
             ClinicalExtractionResult.model_json_schema()
         )
         user = EXTRACTION_USER.format(
-            patient_id=patient_id,
+            patient_id=safe_patient_id,
             encounter_type=encounter_type,
-            encounter_dt=encounter_dt,
+            encounter_dt=safe_encounter_dt,
             document_id=document_id,
-            content=content,
+            content=safe_content,
         )
         model = self._model_for("extract")
         t0 = time.perf_counter()
@@ -703,7 +751,10 @@ class OpenAICompatibleProvider(AIProvider):
         completion_tok = usage.get("completion_tokens")
         total_tok = usage.get("total_tokens")
         parsed = json.loads(raw_text)
-        parsed.setdefault("patientId", patient_id)
+        # The LLM is responding about the redacted patient token; rehydrate
+        # the original IDs on the structured result so downstream code can
+        # still find the patient row in our local DB.
+        parsed["patientId"] = patient_id
         parsed.setdefault("documentId", document_id)
         rec = AICallRecord(
             call_type="extract",
@@ -723,7 +774,14 @@ class OpenAICompatibleProvider(AIProvider):
             patient_id=patient_id,
             document_id=document_id,
         )
-        _persist_ai_call(rec, valid=True, validation_errors=[])
+        _log_redaction("extract", _provider_label(self.base_url), deid)
+        _persist_ai_call(
+            rec,
+            valid=True,
+            validation_errors=[],
+            deidentified=not deid.disabled(),
+            redaction_counts=deid.counts_snapshot(),
+        )
         return parsed, rec
 
     async def suggest_coding(
@@ -734,10 +792,12 @@ class OpenAICompatibleProvider(AIProvider):
         job_id: str | None = None,
         patient_id: str | None = None,
     ) -> tuple[dict[str, Any], AICallRecord]:
+        deid = deidentifier_for(self.settings)
+        safe_facts = deid.pseudonymize_facts(patient_facts)
         system = CODING_SUGGEST_SYSTEM
         user = (
             "Patient structured facts:\n"
-            + json.dumps(patient_facts, default=str)
+            + json.dumps(safe_facts, default=str)
             + f"\n\nStandards enabled: {standards}\n"
             "Return JSON with keys: primaryDiagnosis, secondaryDiagnoses, complications, comorbidities, "
             "codingCandidates, evidence, warnings."
@@ -769,7 +829,14 @@ class OpenAICompatibleProvider(AIProvider):
             patient_id=patient_id,
             document_id=None,
         )
-        _persist_ai_call(rec, valid=True, validation_errors=[])
+        _log_redaction("coding", _provider_label(self.base_url), deid)
+        _persist_ai_call(
+            rec,
+            valid=True,
+            validation_errors=[],
+            deidentified=not deid.disabled(),
+            redaction_counts=deid.counts_snapshot(),
+        )
         return parsed, rec
 
     async def summarize(
@@ -780,8 +847,10 @@ class OpenAICompatibleProvider(AIProvider):
         job_id: str | None = None,
         patient_id: str | None = None,
     ) -> tuple[str, AICallRecord]:
+        deid = deidentifier_for(self.settings)
+        safe_facts = deid.pseudonymize_facts(patient_facts)
         system = summary_system_for(summary_type)
-        user = "Structured facts:\n" + json.dumps(patient_facts, default=str)
+        user = "Structured facts:\n" + json.dumps(safe_facts, default=str)
         model = self._model_for("summary")
         t0 = time.perf_counter()
         raw_text, raw_resp = await self._chat(system, user, model=model, json_mode=False)
@@ -808,7 +877,14 @@ class OpenAICompatibleProvider(AIProvider):
             patient_id=patient_id,
             document_id=None,
         )
-        _persist_ai_call(rec, valid=True, validation_errors=[])
+        _log_redaction("summary", _provider_label(self.base_url), deid)
+        _persist_ai_call(
+            rec,
+            valid=True,
+            validation_errors=[],
+            deidentified=not deid.disabled(),
+            redaction_counts=deid.counts_snapshot(),
+        )
         return raw_text, rec
 
     async def embed(
@@ -819,11 +895,13 @@ class OpenAICompatibleProvider(AIProvider):
         patient_id: str | None = None,
         ref_id: str | None = None,
     ) -> tuple[list[float], AICallRecord]:
+        deid = deidentifier_for(self.settings)
+        safe_text = deid.redact_text(text_in, lang="auto")
         t0 = time.perf_counter()
         async with httpx.AsyncClient(timeout=60) as client:
             r = await client.post(
                 f"{self.base_url}/embeddings",
-                json={"model": self.embedding_model, "input": text_in},
+                json={"model": self.embedding_model, "input": safe_text},
                 headers=self.headers,
             )
             r.raise_for_status()
@@ -849,7 +927,14 @@ class OpenAICompatibleProvider(AIProvider):
             patient_id=patient_id,
             document_id=None,
         )
-        _persist_ai_call(rec, valid=True, validation_errors=[])
+        _log_redaction("embed", _provider_label(self.base_url), deid)
+        _persist_ai_call(
+            rec,
+            valid=True,
+            validation_errors=[],
+            deidentified=not deid.disabled(),
+            redaction_counts=deid.counts_snapshot(),
+        )
         return vec, rec
 
     async def rag_ask(
@@ -860,21 +945,34 @@ class OpenAICompatibleProvider(AIProvider):
         history: list[dict[str, str]] | None = None,
         patient_id: str | None = None,
     ) -> tuple[str, AICallRecord]:
+        deid = deidentifier_for(self.settings)
+        safe_question = deid.redact_text(question, lang="auto")
+        safe_chunks = [
+            {**c, "content": deid.redact_text((c.get("content") or ""), lang="auto")}
+            for c in chunks
+        ]
+        safe_history: list[dict[str, str]] | None = None
+        if history:
+            safe_history = [
+                {"role": t.get("role", "user"), "content": deid.redact_text(t.get("content", ""), lang="auto")}
+                for t in history
+            ]
+
         system = RAG_SYSTEM
         excerpts = "\n".join(
             f"[{i + 1}] {(c.get('content') or '').strip()}"
-            for i, c in enumerate(chunks)
+            for i, c in enumerate(safe_chunks)
         )
         user = (
-            f"Question: {question}\n\n"
+            f"Question: {safe_question}\n\n"
             f"Relevant excerpts from this patient's notes:\n{excerpts}\n\n"
             "Answer the question using ONLY the excerpts. Cite as [N]."
         )
 
         # Compose messages: system, then optional history, then the new user turn.
         payload_messages: list[dict[str, Any]] = [{"role": "system", "content": system}]
-        if history:
-            for turn in history:
+        if safe_history:
+            for turn in safe_history:
                 payload_messages.append({"role": turn["role"], "content": turn["content"]})
         payload_messages.append({"role": "user", "content": user})
 
@@ -920,7 +1018,14 @@ class OpenAICompatibleProvider(AIProvider):
             patient_id=patient_id,
             document_id=None,
         )
-        _persist_ai_call(rec, valid=True, validation_errors=[])
+        _log_redaction("rag", _provider_label(self.base_url), deid)
+        _persist_ai_call(
+            rec,
+            valid=True,
+            validation_errors=[],
+            deidentified=not deid.disabled(),
+            redaction_counts=deid.counts_snapshot(),
+        )
         return content, rec
 
 
