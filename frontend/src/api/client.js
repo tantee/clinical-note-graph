@@ -14,9 +14,26 @@ api.interceptors.request.use((config) => {
   return config
 })
 
+// Recognise an AbortController-cancelled request. axios raises this shape
+// whenever a component aborts its in-flight requests on unmount / route
+// change — which is normal app behaviour, not an error worth surfacing to
+// the user. Without this guard a "canceled" snackbar pops every time you
+// flip tabs mid-load.
+const isCanceledError = (err) =>
+  err?.code === 'ERR_CANCELED'
+  || err?.name === 'CanceledError'
+  || err?.name === 'AbortError'
+  || axios.isCancel?.(err)
+  || err?.message === 'canceled'
+
 api.interceptors.response.use(
   (r) => r,
   (err) => {
+    if (isCanceledError(err)) {
+      // Re-reject so callers' try/catch / .catch chains still see the
+      // cancellation if they care, but skip the global snackbar.
+      return Promise.reject(err)
+    }
     if (err.config?.silent !== true) {
       const msg = err.response?.data?.detail || err.message || 'Request failed'
       try {
