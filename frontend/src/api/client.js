@@ -6,7 +6,17 @@ import { useUiStore } from '../stores/ui.js'
 // resolves the API host. Avoids cross-origin / CORS preflight on dev :8081.
 const baseURL = import.meta.env.VITE_API_BASE || ''
 
-export const api = axios.create({ baseURL, timeout: 120000 })
+// axios v1 defaults to bracket-style array serialization (`key[]=a&key[]=b`)
+// which FastAPI's `list[str] = Query(default=[])` doesn't recognise — it
+// wants repeat keys (`key=a&key=b`). Without this, GET /api/patient/{id}/graph
+// with scope=encounter silently returns 400 because the encounterId list
+// arrives empty on the backend. `indexes: null` flips the global serializer
+// to the repeat-key shape.
+export const api = axios.create({
+  baseURL,
+  timeout: 120000,
+  paramsSerializer: { indexes: null },
+})
 
 api.interceptors.request.use((config) => {
   const key = localStorage.getItem('cng_api_key')

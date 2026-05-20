@@ -1,6 +1,6 @@
 <template>
   <v-card v-if="value" class="mt-4">
-    <SectionHeader title="Coding suggestion" icon="mdi-medical-bag-outline">
+    <SectionHeader title="Coding suggestion" icon="mdi-tag-text-outline">
       <template #actions><v-chip size="x-small" color="warning" variant="tonal">AI-assisted</v-chip></template>
     </SectionHeader>
     <v-divider />
