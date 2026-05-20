@@ -375,6 +375,55 @@ def mock_extract(content: str, *, patient_id: str, encounter_id: str | None, doc
     if observations:
         summary_bits.append("Obs: " + ", ".join(f"{o['name']}={o['value']}" for o in observations[:5]))
 
+    # Mock the new prompt's expected outputs deterministically so the e2e
+    # suite + dev demo show meaningful relationships, severity, and status
+    # without needing a real LLM. Patterns chosen are obvious / well-known:
+    # metformin TREATS diabetes, HbA1c MONITORS diabetes,
+    # diabetic nephropathy COMPLICATION_OF diabetes.
+    relationships: list[dict[str, Any]] = []
+    keyword_pairs = [
+        ("metformin",   "treats",  "diabetes"),
+        ("insulin",     "treats",  "diabetes"),
+        ("lisinopril",  "treats",  "hypertension"),
+        ("amlodipine",  "treats",  "hypertension"),
+        ("atorvastatin","treats",  "hyperlipidemia"),
+    ]
+    for med_kw, relation, cond_kw in keyword_pairs:
+        med_match = next((m for m in medications if med_kw in m["name"].lower()), None)
+        cond_match = next((p for p in problems if cond_kw in p["value"].lower()), None)
+        if med_match and cond_match:
+            relationships.append({
+                "sourceType": "medication", "sourceValue": med_match["name"],
+                "targetType": "condition",  "targetValue": cond_match["value"],
+                "relation": relation,
+                "evidenceText": med_match.get("evidenceText"),
+                "confidence": 0.75,
+            })
+    obs_to_cond_kw = [
+        ("hba1c",      "diabetes"),
+        ("glucose",    "diabetes"),
+        ("blood pressure", "hypertension"),
+    ]
+    for obs_kw, cond_kw in obs_to_cond_kw:
+        obs_match = next((o for o in observations if obs_kw in o["name"].lower()), None)
+        cond_match = next((p for p in problems if cond_kw in p["value"].lower()), None)
+        if obs_match and cond_match:
+            relationships.append({
+                "sourceType": "observation", "sourceValue": obs_match["name"],
+                "targetType": "condition",   "targetValue": cond_match["value"],
+                "relation": "monitors",
+                "evidenceText": obs_match.get("evidenceText"),
+                "confidence": 0.8,
+            })
+
+    # Light severity / status hints on conditions — same deterministic rule.
+    for p in problems:
+        v = p["value"].lower()
+        if "diabetes" in v or "hypertension" in v or "ckd" in v:
+            p["status"] = "active"
+        if "stage 3" in v or "severe" in v:
+            p["severity"] = "severe"
+
     result = {
         "patientId": patient_id,
         "encounterId": encounter_id,
@@ -390,6 +439,7 @@ def mock_extract(content: str, *, patient_id: str, encounter_id: str | None, doc
         "codingCandidates": coding,
         "graphUpdates": [],
         "markdownUpdates": [],
+        "relationships": relationships,
         "warnings": [],
     }
     # validate before returning

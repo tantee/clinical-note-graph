@@ -79,6 +79,25 @@ AI_MODEL=anthropic/claude-3.5-haiku
 AI_EMBEDDING_MODEL=openai/text-embedding-3-small
 ```
 
+### Model-fit guidance for the extraction step
+
+The `extract` call type carries the heaviest reasoning load — the prompt now asks the model to populate, in addition to the structured facts:
+
+- **Severity + temporality** on each condition (mild/moderate/severe/critical, active/resolved/in_remission/suspected/ruled_out, onset/resolved dates).
+- **Inter-fact relationships** — `Medication-[treats]→Condition`, `Observation-[monitors]→Condition`, `Condition-[complication_of]→Condition`, `Observation-[panel_member_of]→Observation`, etc.
+
+All these fields are **optional** in the schema — a weaker model that omits them still validates, and the graph layer falls back to the existing heuristic + co-occurrence paths. But you'll get a richer graph from a stronger model. Practical guidance:
+
+| Model class | Extraction fit | Notes |
+|---|---|---|
+| `gemini-2.5-flash`, `claude-3.5-sonnet`, `claude-3.7-sonnet`, `gpt-4o`, `gpt-5-mini` | **Recommended.** Reliably produces severity, status, and a useful relationships list. | Use as `AI_MODEL_EXTRACT` if your default `AI_MODEL` is cheaper. |
+| `claude-3.5-haiku`, `gpt-4o-mini`, `gemini-2.5-flash-lite` | OK on structured facts; relationships often sparse or missing. | Acceptable as a default; consider a stronger `AI_MODEL_EXTRACT` if the graph looks bare. |
+| `deepseek-r1-0528`, `gpt-5-mini` (with reasoning) | Strongest on inter-fact reasoning — finds complications, "due to" links the others miss. | Expensive on reasoning tokens; only worth it if the graph quality matters more than per-call cost. |
+| `llama-3.3-70b`, `qwen-2.5-72b` via Groq | Schema adherence sometimes wobbly on the relationships list; safer with a JSON-mode-strict provider. | Watch `ai_outputs.error` for validation failures. |
+| `mock` (offline default) | Emits a deterministic demo relationships list (metformin treats diabetes, HbA1c monitors diabetes, etc.) so the graph works without an API key. | Not clinically meaningful; just a wiring test. |
+
+**Rule of thumb:** if you check the graph and the only edges are `HAS_CONDITION` / `HAS_OBSERVATION`, your extract model is leaving the new fields empty. Try a stronger model just for extract via `AI_MODEL_EXTRACT` before increasing your spend across the board.
+
 Three ways to change them (any one works, all merge into the same effective settings):
 
 1. **UI** — `/#/config` → AI provider card → fill in the per-task fields → Save.

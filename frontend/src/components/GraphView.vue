@@ -231,32 +231,84 @@ function tooltip(n) {
 function render() {
   if (!container.value) return
   const { label: labelColor, stroke: strokeColor } = themeColors()
-  const nodes = new DataSet((data.value.nodes || []).map((n) => ({
-    id: n.id,
-    label: shortLabel(n),
-    title: tooltip(n),
-    color: { background: COLORS[n.label] || '#90a4ae', border: '#37474f' },
-    font: { color: labelColor, strokeColor, strokeWidth: 3, size: 12 },
-    shape: 'dot',
-    size: n.label === 'Patient' ? 24 : 14,
-  })))
+  const nodes = new DataSet((data.value.nodes || []).map((n) => {
+    const d = n.data || {}
+    // Severity / status apply to Condition (and Allergy) nodes. Severe /
+    // critical get a red ring; resolved / inactive get muted to a faint
+    // fill so the eye walks past them. Defaults keep the existing tone.
+    const sev = d.severity || null
+    const status = d.status || null
+    let border = '#37474f'
+    let borderWidth = 1.5
+    let bg = COLORS[n.label] || '#90a4ae'
+    if (n.label === 'Condition' || n.label === 'Allergy') {
+      if (sev === 'critical') {
+        border = '#b71c1c'; borderWidth = 4
+      } else if (sev === 'severe') {
+        border = '#e53935'; borderWidth = 3
+      } else if (sev === 'mild') {
+        border = '#43a047'
+      }
+      if (status === 'resolved' || status === 'inactive' || status === 'ruled_out') {
+        // De-saturated muted variant — same hue family, much less ink.
+        bg = '#eceff1'
+        border = '#b0bec5'
+      } else if (status === 'suspected') {
+        // Suspected — dashed border isn't supported by vis-network nodes,
+        // so use a softer tone + thinner border to signal "tentative".
+        border = '#90a4ae'
+        borderWidth = 1
+      }
+    }
+    return {
+      id: n.id,
+      label: shortLabel(n),
+      title: tooltip(n),
+      color: { background: bg, border },
+      borderWidth,
+      font: { color: labelColor, strokeColor, strokeWidth: 3, size: 12 },
+      shape: 'dot',
+      size: n.label === 'Patient' ? 24 : 14,
+    }
+  }))
+  // Edge categories — drives both styling (color, dash, arrow) and how
+  // the rendered label reads. The first two groups are the ones the user
+  // is most likely to scan visually.
+  // - Causal / consequential: COMPLICATION_OF, DUE_TO, CAUSES. Strong
+  //   directionality, painted in a warm tone.
+  // - Therapeutic / monitoring: TREATED_BY, TREATS, MONITORED_BY, MONITORS,
+  //   PLAN_FOR, ADDRESSES, DIAGNOSTIC_OF. Primary tone — the main hierarchy.
+  // - Peer / co-occurrence: CO_OCCURS, RELATED_TO, PANEL_MEMBER_OF. Dashed
+  //   grey, no arrow — these are not hierarchical.
+  // - Sequence: PRECEDES, FOLLOWS. Thin grey arrow.
+  // - Direct parent edges (HAS_CONDITION etc.): plain grey arrow.
+  const CAUSAL = new Set(['COMPLICATION_OF', 'DUE_TO', 'CAUSES'])
+  const HIERARCHICAL = new Set([
+    'TREATED_BY', 'TREATS', 'MONITORED_BY', 'MONITORS',
+    'PLAN_FOR', 'ADDRESSES', 'DIAGNOSTIC_OF',
+  ])
+  const PEER = new Set(['CO_OCCURS', 'RELATED_TO', 'PANEL_MEMBER_OF'])
+  const SEQUENCE = new Set(['PRECEDES', 'FOLLOWS'])
+
   const edges = new DataSet((data.value.edges || []).map((e, i) => {
-    // Co-occurrence edges connect peer Conditions, so they shouldn't look
-    // like the primary hierarchy. Dashed + lighter + no arrow.
-    const isCoOccurs = e.type === 'CO_OCCURS'
-    // TREATED_BY / MONITORED_BY / PLAN_FOR run from a Condition down to a
-    // related fact — paint them in the primary tone so the hierarchy is
-    // visually obvious vs. the muted CO_OCCURS edges.
-    const isHierarchical = e.type === 'TREATED_BY' || e.type === 'MONITORED_BY' || e.type === 'PLAN_FOR'
+    const isCausal = CAUSAL.has(e.type)
+    const isHierarchical = HIERARCHICAL.has(e.type)
+    const isPeer = PEER.has(e.type)
+    const isSequence = SEQUENCE.has(e.type)
     return {
       id: 'e' + i, from: e.from, to: e.to, label: e.type,
-      arrows: isCoOccurs ? '' : 'to',
-      dashes: isCoOccurs ? [2, 4] : false,
+      arrows: isPeer ? '' : 'to',
+      dashes: isPeer ? [2, 4] : (isSequence ? [4, 2] : false),
       font: { size: 9, color: labelColor, strokeColor, strokeWidth: 3 },
       color: {
-        color: isCoOccurs ? '#cfd8dc' : (isHierarchical ? '#1f6feb' : '#9e9e9e'),
+        color: isCausal ? '#e53935'
+             : isHierarchical ? '#1f6feb'
+             : isPeer ? '#cfd8dc'
+             : isSequence ? '#90a4ae'
+             : '#9e9e9e',
         highlight: '#1f6feb',
       },
+      width: isCausal ? 2 : 1,
       smooth: { type: 'continuous' },
     }
   }))

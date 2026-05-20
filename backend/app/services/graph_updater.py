@@ -61,6 +61,38 @@ def _root_params(patient: dict[str, Any], encounter: dict[str, Any], document: d
     }
 
 
+# Maps the canonical clinical relation names emitted by the AI extractor
+# to the Neo4j relationship-type label we store on the edge. Kept small
+# and explicit — anything not in this dict is rejected as unsupported
+# (the schema's RelationKind Literal makes that unreachable, but defence
+# in depth costs nothing).
+_AI_RELATION_TO_REL_TYPE: dict[str, str] = {
+    "treats":             "TREATS",
+    "addresses":          "ADDRESSES",
+    "monitors":           "MONITORS",
+    "diagnostic_of":      "DIAGNOSTIC_OF",
+    "causes":             "CAUSES",
+    "due_to":             "DUE_TO",
+    "complication_of":    "COMPLICATION_OF",
+    "co_occurs":          "CO_OCCURS",
+    "related_to":         "RELATED_TO",
+    "panel_member_of":    "PANEL_MEMBER_OF",
+    "precedes":           "PRECEDES",
+    "follows":            "FOLLOWS",
+}
+
+# Where to look in the Patient graph for the endpoint of an AI-declared
+# relationship. Maps a fact_type → (label, key_property).
+_FACT_LOOKUP: dict[str, tuple[str, str]] = {
+    "condition":  ("Condition",  "value"),
+    "medication": ("Medication", "name"),
+    "observation": ("Observation", "name"),
+    "procedure":  ("Procedure",  "value"),
+    "allergy":    ("Allergy",    "value"),
+    "plan":       ("Plan",       "description"),
+}
+
+
 def update_graph_for_document(
     patient: dict[str, Any],
     encounter: dict[str, Any],
@@ -76,6 +108,8 @@ def update_graph_for_document(
         {
             "value": f.value, "code": f.normalizedCode, "system": f.codingSystem,
             "reviewStatus": f.reviewStatus, "confidence": f.confidence, "evidence": f.evidenceText,
+            "severity": f.severity, "status": f.status,
+            "onsetDate": iso(f.onsetDate), "resolvedDate": iso(f.resolvedDate),
         }
         for f in extraction.problems
     ]
@@ -132,6 +166,9 @@ def update_graph_for_document(
         if coding_candidates:
             s.run(_CYPHER_CODING, {**params, "rows": coding_candidates})
 
+    # AI-declared inter-fact relationships — write last so all fact nodes
+    # the relationships refer to already exist.
+    counts["relationships"] = _write_ai_relationships(extraction, params)
     return counts
 
 
@@ -162,12 +199,77 @@ MERGE (c:Condition {patientId: $patientId, value: r.value})
       c.codingSystem = coalesce(r.system, c.codingSystem),
       c.lastSeen = datetime(),
       c.reviewStatus = coalesce(c.reviewStatus, r.reviewStatus),
-      c.confidence = coalesce(c.confidence, r.confidence)
+      c.confidence = coalesce(c.confidence, r.confidence),
+      // Severity / status / temporality come from the AI extractor when
+      // the source EMR supports them. Use coalesce so a fresh mention
+      // with null severity doesn't blank an earlier high-confidence
+      // assertion — the longitudinal record wins.
+      c.severity = coalesce(r.severity, c.severity),
+      c.status = coalesce(r.status, c.status),
+      c.onsetDate = coalesce(c.onsetDate, r.onsetDate),
+      c.resolvedDate = coalesce(r.resolvedDate, c.resolvedDate)
 MERGE (e)-[:MENTIONS]->(c)
 MERGE (d)-[ext:EXTRACTED]->(c)
   SET ext.evidence = r.evidence, ext.confidence = r.confidence,
       ext.createdAt = coalesce(ext.createdAt, datetime())
 """
+
+
+# AI-declared relationships are written one query per relation-type so the
+# stored Cypher relationship label is a literal (Cypher can't bind a
+# variable relationship type in core syntax). The `_AI_RELATION_TO_REL_TYPE`
+# dict above is the source of allowed types; everything else is filtered
+# out client-side before this runs.
+def _cypher_for_relation(rel_type: str) -> str:
+    return f"""
+UNWIND $rows AS r
+MATCH (src {{patientId: $patientId}})
+  WHERE labels(src)[0] = r.sourceLabel AND
+        (src[r.sourceKey] = r.sourceValue OR toLower(src[r.sourceKey]) = toLower(r.sourceValue))
+MATCH (tgt {{patientId: $patientId}})
+  WHERE labels(tgt)[0] = r.targetLabel AND
+        (tgt[r.targetKey] = r.targetValue OR toLower(tgt[r.targetKey]) = toLower(r.targetValue))
+MERGE (src)-[rel:{rel_type}]->(tgt)
+  ON CREATE SET rel.createdAt = datetime(), rel.aiDeclared = true
+  SET rel.evidence = coalesce(r.evidence, rel.evidence),
+      rel.confidence = coalesce(r.confidence, rel.confidence),
+      rel.lastSeen = datetime()
+"""
+
+
+def _write_ai_relationships(extraction: ClinicalExtractionResult, params: dict[str, Any]) -> int:
+    """Group AI-declared relationships by relation type and write them.
+
+    Drops any relationship whose endpoint is missing from _FACT_LOOKUP
+    (defensive — RelationKind / FactType in the schema already restrict
+    inputs)."""
+    by_rel: dict[str, list[dict[str, Any]]] = {}
+    for r in extraction.relationships:
+        rel_type = _AI_RELATION_TO_REL_TYPE.get(r.relation)
+        if not rel_type:
+            continue
+        src_lookup = _FACT_LOOKUP.get(r.sourceType)
+        tgt_lookup = _FACT_LOOKUP.get(r.targetType)
+        if not src_lookup or not tgt_lookup:
+            continue
+        src_label, src_key = src_lookup
+        tgt_label, tgt_key = tgt_lookup
+        by_rel.setdefault(rel_type, []).append({
+            "sourceLabel": src_label, "sourceKey": src_key,
+            "sourceValue": r.sourceValue,
+            "targetLabel": tgt_label, "targetKey": tgt_key,
+            "targetValue": r.targetValue,
+            "evidence": r.evidenceText,
+            "confidence": r.confidence,
+        })
+    if not by_rel:
+        return 0
+    written = 0
+    with neo4j_session() as s:
+        for rel_type, rows in by_rel.items():
+            s.run(_cypher_for_relation(rel_type), {**params, "rows": rows})
+            written += len(rows)
+    return written
 
 _CYPHER_MEDICATIONS = """
 MATCH (e:Encounter {encounterId: $encounterId}), (d:Document {documentId: $documentId})
@@ -501,6 +603,16 @@ def _graph_cypher(
         "<-[:MENTIONS]-(:Encounter)-[:MENTIONS]->"
         "(cc2:Condition {patientId: $pid})"
         " WHERE cc1.value < cc2.value",
+        # AI-declared inter-fact relationships (TREATS, MONITORS,
+        # COMPLICATION_OF, …). The match is intentionally broad: any
+        # patient-scoped fact node (Condition, Medication, Observation,
+        # Procedure, Allergy, Plan) on either side, joined by any of the
+        # AI-relation labels we know about. The relationship is whichever
+        # label the type-specific writer used; we only return ones with
+        # `aiDeclared=true` to keep the heuristic-derived TREATS edges
+        # (which we already surface via `treats_pairs`) from doubling up.
+        "OPTIONAL MATCH (rel_src {patientId: $pid})-[ai_r]->(rel_tgt {patientId: $pid})"
+        " WHERE ai_r.aiDeclared = true",
     ]
     if include_documents:
         parts.append("OPTIONAL MATCH (e)-[:HAS_DOCUMENT]->(d:Document)")
@@ -521,7 +633,14 @@ def _graph_cypher(
         # Distinct (cond1, cond2, encounter) triples — _add_cooccurrence_edges
         # counts encounters per pair so it can apply a min-encounters
         # threshold and only emit clinically meaningful comorbidity links.
-        "collect(DISTINCT {a: cc1.value, b: cc2.value, eid: e.encounterId}) AS cooccurs_triples"
+        "collect(DISTINCT {a: cc1.value, b: cc2.value, eid: e.encounterId}) AS cooccurs_triples, "
+        # AI-declared relationships, returned with enough metadata for the
+        # materialiser to locate the source / target nodes by label + key.
+        "collect(DISTINCT {"
+        "  srcLabel: labels(rel_src)[0], srcKey: coalesce(rel_src.value, rel_src.name, rel_src.description),"
+        "  tgtLabel: labels(rel_tgt)[0], tgtKey: coalesce(rel_tgt.value, rel_tgt.name, rel_tgt.description),"
+        "  relType: type(ai_r), evidence: ai_r.evidence, confidence: ai_r.confidence"
+        "}) AS ai_relationships"
     )
     cypher = "\n        ".join(parts)
     return cypher, {"pid": patient_id, "eids": encounter_ids}
@@ -756,6 +875,32 @@ def _materialize_rows(row: dict[str, Any], *, include_encounters: bool,
     _add_cooccurrence_edges(
         row.get("cooccurs_triples") or [], cond_id_by_value, edges,
     )
+
+    # AI-declared edges (TREATS / MONITORS / COMPLICATION_OF / DUE_TO / …).
+    # The Cypher returned each row with label + key so we can find the
+    # matching node id from the ones we already added. Match is
+    # case-insensitive so the LLM saying "Diabetes" links to a node
+    # whose value is "diabetes".
+    node_index: dict[tuple[str, str], str] = {}
+    for n in nodes:
+        d = n.get("data") or {}
+        key = d.get("value") or d.get("name") or d.get("description")
+        if key is None:
+            continue
+        node_index[(n["label"], str(key).strip().casefold())] = n["id"]
+    for r in (row.get("ai_relationships") or []):
+        if not r or not r.get("relType"):
+            continue
+        src = node_index.get((r.get("srcLabel") or "", str(r.get("srcKey") or "").strip().casefold()))
+        tgt = node_index.get((r.get("tgtLabel") or "", str(r.get("tgtKey") or "").strip().casefold()))
+        if not src or not tgt or src == tgt:
+            continue
+        edges.append({
+            "from": src, "to": tgt, "type": r["relType"],
+            "evidence": r.get("evidence"),
+            "confidence": r.get("confidence"),
+            "aiDeclared": True,
+        })
 
     if include_documents:
         for d in (row.get("docs") or []):
