@@ -61,6 +61,38 @@ def _root_params(patient: dict[str, Any], encounter: dict[str, Any], document: d
     }
 
 
+# Maps the canonical clinical relation names emitted by the AI extractor
+# to the Neo4j relationship-type label we store on the edge. Kept small
+# and explicit — anything not in this dict is rejected as unsupported
+# (the schema's RelationKind Literal makes that unreachable, but defence
+# in depth costs nothing).
+_AI_RELATION_TO_REL_TYPE: dict[str, str] = {
+    "treats":             "TREATS",
+    "addresses":          "ADDRESSES",
+    "monitors":           "MONITORS",
+    "diagnostic_of":      "DIAGNOSTIC_OF",
+    "causes":             "CAUSES",
+    "due_to":             "DUE_TO",
+    "complication_of":    "COMPLICATION_OF",
+    "co_occurs":          "CO_OCCURS",
+    "related_to":         "RELATED_TO",
+    "panel_member_of":    "PANEL_MEMBER_OF",
+    "precedes":           "PRECEDES",
+    "follows":            "FOLLOWS",
+}
+
+# Where to look in the Patient graph for the endpoint of an AI-declared
+# relationship. Maps a fact_type → (label, key_property).
+_FACT_LOOKUP: dict[str, tuple[str, str]] = {
+    "condition":  ("Condition",  "value"),
+    "medication": ("Medication", "name"),
+    "observation": ("Observation", "name"),
+    "procedure":  ("Procedure",  "value"),
+    "allergy":    ("Allergy",    "value"),
+    "plan":       ("Plan",       "description"),
+}
+
+
 def update_graph_for_document(
     patient: dict[str, Any],
     encounter: dict[str, Any],
@@ -76,6 +108,8 @@ def update_graph_for_document(
         {
             "value": f.value, "code": f.normalizedCode, "system": f.codingSystem,
             "reviewStatus": f.reviewStatus, "confidence": f.confidence, "evidence": f.evidenceText,
+            "severity": f.severity, "status": f.status,
+            "onsetDate": iso(f.onsetDate), "resolvedDate": iso(f.resolvedDate),
         }
         for f in extraction.problems
     ]
@@ -132,6 +166,9 @@ def update_graph_for_document(
         if coding_candidates:
             s.run(_CYPHER_CODING, {**params, "rows": coding_candidates})
 
+    # AI-declared inter-fact relationships — write last so all fact nodes
+    # the relationships refer to already exist.
+    counts["relationships"] = _write_ai_relationships(extraction, params)
     return counts
 
 
@@ -162,12 +199,77 @@ MERGE (c:Condition {patientId: $patientId, value: r.value})
       c.codingSystem = coalesce(r.system, c.codingSystem),
       c.lastSeen = datetime(),
       c.reviewStatus = coalesce(c.reviewStatus, r.reviewStatus),
-      c.confidence = coalesce(c.confidence, r.confidence)
+      c.confidence = coalesce(c.confidence, r.confidence),
+      // Severity / status / temporality come from the AI extractor when
+      // the source EMR supports them. Use coalesce so a fresh mention
+      // with null severity doesn't blank an earlier high-confidence
+      // assertion — the longitudinal record wins.
+      c.severity = coalesce(r.severity, c.severity),
+      c.status = coalesce(r.status, c.status),
+      c.onsetDate = coalesce(c.onsetDate, r.onsetDate),
+      c.resolvedDate = coalesce(r.resolvedDate, c.resolvedDate)
 MERGE (e)-[:MENTIONS]->(c)
 MERGE (d)-[ext:EXTRACTED]->(c)
   SET ext.evidence = r.evidence, ext.confidence = r.confidence,
       ext.createdAt = coalesce(ext.createdAt, datetime())
 """
+
+
+# AI-declared relationships are written one query per relation-type so the
+# stored Cypher relationship label is a literal (Cypher can't bind a
+# variable relationship type in core syntax). The `_AI_RELATION_TO_REL_TYPE`
+# dict above is the source of allowed types; everything else is filtered
+# out client-side before this runs.
+def _cypher_for_relation(rel_type: str) -> str:
+    return f"""
+UNWIND $rows AS r
+MATCH (src {{patientId: $patientId}})
+  WHERE labels(src)[0] = r.sourceLabel AND
+        (src[r.sourceKey] = r.sourceValue OR toLower(src[r.sourceKey]) = toLower(r.sourceValue))
+MATCH (tgt {{patientId: $patientId}})
+  WHERE labels(tgt)[0] = r.targetLabel AND
+        (tgt[r.targetKey] = r.targetValue OR toLower(tgt[r.targetKey]) = toLower(r.targetValue))
+MERGE (src)-[rel:{rel_type}]->(tgt)
+  ON CREATE SET rel.createdAt = datetime(), rel.aiDeclared = true
+  SET rel.evidence = coalesce(r.evidence, rel.evidence),
+      rel.confidence = coalesce(r.confidence, rel.confidence),
+      rel.lastSeen = datetime()
+"""
+
+
+def _write_ai_relationships(extraction: ClinicalExtractionResult, params: dict[str, Any]) -> int:
+    """Group AI-declared relationships by relation type and write them.
+
+    Drops any relationship whose endpoint is missing from _FACT_LOOKUP
+    (defensive — RelationKind / FactType in the schema already restrict
+    inputs)."""
+    by_rel: dict[str, list[dict[str, Any]]] = {}
+    for r in extraction.relationships:
+        rel_type = _AI_RELATION_TO_REL_TYPE.get(r.relation)
+        if not rel_type:
+            continue
+        src_lookup = _FACT_LOOKUP.get(r.sourceType)
+        tgt_lookup = _FACT_LOOKUP.get(r.targetType)
+        if not src_lookup or not tgt_lookup:
+            continue
+        src_label, src_key = src_lookup
+        tgt_label, tgt_key = tgt_lookup
+        by_rel.setdefault(rel_type, []).append({
+            "sourceLabel": src_label, "sourceKey": src_key,
+            "sourceValue": r.sourceValue,
+            "targetLabel": tgt_label, "targetKey": tgt_key,
+            "targetValue": r.targetValue,
+            "evidence": r.evidenceText,
+            "confidence": r.confidence,
+        })
+    if not by_rel:
+        return 0
+    written = 0
+    with neo4j_session() as s:
+        for rel_type, rows in by_rel.items():
+            s.run(_cypher_for_relation(rel_type), {**params, "rows": rows})
+            written += len(rows)
+    return written
 
 _CYPHER_MEDICATIONS = """
 MATCH (e:Encounter {encounterId: $encounterId}), (d:Document {documentId: $documentId})
@@ -251,6 +353,153 @@ FOREACH (_ IN CASE WHEN c IS NULL THEN [] ELSE [1] END |
   MERGE (cc)-[:CODES]->(c)
 )
 """
+
+
+def wipe_patient_subgraph(patient_id: str) -> dict[str, int]:
+    """Delete the patient's encounters, documents, and all derived nodes
+    (conditions, medications, observations, …) plus their relationships,
+    leaving the `Patient` node intact so re-ingest doesn't have to recreate
+    it. Used by the rebuild endpoint to clean up duplicate nodes accumulated
+    from prior incremental writes — the Observation Cypher MERGE keys on
+    `dateTime` which defaults to `datetime()` (NOW) when missing, so every
+    ingest with un-timestamped readings creates fresh nodes.
+
+    Returns the labels that were targeted so the caller can confirm the
+    wipe ran. Counts aren't returned to keep the path simple (no RETURN
+    queries to round-trip).
+    """
+    ensure_constraints()
+    deleted_labels: list[str] = []
+    with neo4j_session() as s:
+        # Encounters + documents link from the Patient via HAS_ENCOUNTER /
+        # HAS_DOCUMENT and don't carry a patientId property of their own.
+        s.run(
+            "MATCH (p:Patient {patientId: $pid})-[:HAS_ENCOUNTER|HAS_DOCUMENT*1..2]->(n) "
+            "WHERE n:Encounter OR n:Document "
+            "DETACH DELETE n",
+            {"pid": patient_id},
+        )
+        deleted_labels.extend(["Encounter", "Document"])
+        # Per-fact nodes carry patientId; one query per label keeps a single
+        # failure from rolling back the whole wipe.
+        for label in (
+            "Condition", "Medication", "Observation", "Procedure",
+            "Allergy", "Plan", "CodingCandidate",
+        ):
+            s.run(
+                f"MATCH (n:{label} {{patientId: $pid}}) DETACH DELETE n",
+                {"pid": patient_id},
+            )
+            deleted_labels.append(label)
+    return {"labels": deleted_labels}
+
+
+def backfill_graph_for_document(
+    patient: dict[str, Any],
+    encounter: dict[str, Any],
+    document: dict[str, Any],
+    facts: list[dict[str, Any]],
+) -> dict[str, int]:
+    """Push raw Postgres fact rows for one document into Neo4j.
+
+    This is the recovery path for the silent-graph-upsert-failure mode: if
+    Neo4j was unhealthy during ingest, the patient ends up with facts in
+    Postgres but an empty graph. The original `update_graph_for_document`
+    needs a fully-formed `ClinicalExtractionResult`, which we don't have
+    after the AI call has been audited and discarded. This function operates
+    on the same raw rows that `gather_patient_facts` returns and reuses the
+    same Cypher constants, so the resulting graph is structurally identical
+    to what a fresh ingest would have produced.
+
+    `patient`, `encounter`, and `document` should be dicts with the same
+    keys the original function expects (`patientId`, `encounterId`,
+    `documentId`, …); the caller is responsible for mapping from Postgres
+    snake_case row keys.
+    """
+    ensure_constraints()
+
+    def _by(type_: str) -> list[dict[str, Any]]:
+        return [f for f in facts if f.get("type") == type_]
+
+    def _extra(f: dict[str, Any], k: str) -> Any:
+        return (f.get("extra") or {}).get(k)
+
+    conditions = [
+        {
+            "value": f["value"], "code": f.get("normalized_code"),
+            "system": f.get("coding_system"),
+            "reviewStatus": f.get("review_status") or "ai_suggested",
+            "confidence": f.get("confidence"), "evidence": f.get("evidence_text"),
+        }
+        for f in _by("condition")
+    ]
+    medications = [
+        {
+            "name": f["value"], "rxNorm": _extra(f, "rxNorm"),
+            "action": _extra(f, "action") or "continue",
+            "dose": _extra(f, "dose"), "route": _extra(f, "route"),
+            "frequency": _extra(f, "frequency"),
+            "indication": _extra(f, "indication"),
+            "evidence": f.get("evidence_text"),
+        }
+        for f in _by("medication")
+    ]
+    observations = [
+        {
+            "name": f["value"], "loinc": f.get("normalized_code"),
+            "value": _extra(f, "value") or "",
+            "unit": _extra(f, "unit"),
+            "abnormalFlag": _extra(f, "abnormalFlag"),
+            "dt": iso(f.get("date_time")),
+        }
+        for f in _by("observation")
+    ]
+    procedures = [
+        {"value": f["value"], "code": f.get("normalized_code"), "system": f.get("coding_system")}
+        for f in _by("procedure")
+    ]
+    allergies = [{"value": f["value"]} for f in _by("allergy")]
+    plans = [
+        {"description": f["value"], "category": _extra(f, "category") or "other",
+         "addresses": _extra(f, "addressesCondition")}
+        for f in _by("plan")
+    ]
+    coding_candidates = [
+        {"system": f.get("coding_system") or _extra(f, "system"),
+         "code": f.get("normalized_code") or _extra(f, "code"),
+         "display": _extra(f, "display") or f["value"],
+         "forCondition": _extra(f, "forCondition") or f["value"],
+         "confidence": f.get("confidence")}
+        for f in _by("coding_candidate")
+        if f.get("value") and (f.get("normalized_code") or _extra(f, "code"))
+    ]
+
+    params = _root_params(patient, encounter, document)
+    counts = {
+        "conditions": len(conditions), "medications": len(medications),
+        "observations": len(observations), "procedures": len(procedures),
+        "allergies": len(allergies), "plans": len(plans),
+        "codingCandidates": len(coding_candidates),
+    }
+
+    with neo4j_session() as s:
+        s.run(_CYPHER_ROOT, params)
+        if conditions:
+            s.run(_CYPHER_CONDITIONS, {**params, "rows": conditions})
+        if medications:
+            s.run(_CYPHER_MEDICATIONS, {**params, "rows": medications})
+        if observations:
+            s.run(_CYPHER_OBSERVATIONS, {**params, "rows": observations})
+        if procedures:
+            s.run(_CYPHER_PROCEDURES, {**params, "rows": procedures})
+        if allergies:
+            s.run(_CYPHER_ALLERGIES, {**params, "rows": allergies})
+        if plans:
+            s.run(_CYPHER_PLANS, {**params, "rows": plans})
+        if coding_candidates:
+            s.run(_CYPHER_CODING, {**params, "rows": coding_candidates})
+
+    return counts
 
 
 def _jsonable(value: Any) -> Any:
@@ -340,6 +589,30 @@ def _graph_cypher(
         "OPTIONAL MATCH (e)-[:PRESCRIBED]->(m:Medication)" + fact_filter.replace("n.", "m."),
         "OPTIONAL MATCH (e)-[:HAS_PLAN]->(pl:Plan)" + fact_filter.replace("n.", "pl."),
         "OPTIONAL MATCH (p)-[:HAS_ALLERGY]->(a:Allergy)" + fact_filter.replace("n.", "a."),
+        # Cross-fact edges the ingest pipeline already stores: surface them so
+        # the rendered graph isn't just a star around the patient.
+        "OPTIONAL MATCH (m)-[:TREATS]->(treats_c:Condition)",
+        "OPTIONAL MATCH (pl)-[:ADDRESSES]->(addr_c:Condition)",
+        # Conditions that share at least one encounter — used to draw a
+        # faint CO_OCCURS link between them. Pair filter `c1.value < c2.value`
+        # gives each unordered pair once. Real Neo4j stores conditions as
+        # longitudinal nodes (one per (patientId, value)) and the encounter
+        # linkage lives on the [:MENTIONS] relationship — that's why we
+        # can't just read `encounterId` off the Condition.
+        "OPTIONAL MATCH (cc1:Condition {patientId: $pid})"
+        "<-[:MENTIONS]-(:Encounter)-[:MENTIONS]->"
+        "(cc2:Condition {patientId: $pid})"
+        " WHERE cc1.value < cc2.value",
+        # AI-declared inter-fact relationships (TREATS, MONITORS,
+        # COMPLICATION_OF, …). The match is intentionally broad: any
+        # patient-scoped fact node (Condition, Medication, Observation,
+        # Procedure, Allergy, Plan) on either side, joined by any of the
+        # AI-relation labels we know about. The relationship is whichever
+        # label the type-specific writer used; we only return ones with
+        # `aiDeclared=true` to keep the heuristic-derived TREATS edges
+        # (which we already surface via `treats_pairs`) from doubling up.
+        "OPTIONAL MATCH (rel_src {patientId: $pid})-[ai_r]->(rel_tgt {patientId: $pid})"
+        " WHERE ai_r.aiDeclared = true",
     ]
     if include_documents:
         parts.append("OPTIONAL MATCH (e)-[:HAS_DOCUMENT]->(d:Document)")
@@ -352,10 +625,123 @@ def _graph_cypher(
         "collect(DISTINCT o) AS observations, "
         "collect(DISTINCT m) AS medications, "
         "collect(DISTINCT pl) AS plans, "
-        "collect(DISTINCT a) AS allergies"
+        "collect(DISTINCT a) AS allergies, "
+        # Returned as pair lists so _materialize_rows can build edges
+        # between specific nodes rather than recomputing the relationship.
+        "collect(DISTINCT {medName: m.name, condValue: treats_c.value}) AS treats_pairs, "
+        "collect(DISTINCT {planDesc: pl.description, condValue: addr_c.value}) AS addresses_pairs, "
+        # Distinct (cond1, cond2, encounter) triples — _add_cooccurrence_edges
+        # counts encounters per pair so it can apply a min-encounters
+        # threshold and only emit clinically meaningful comorbidity links.
+        "collect(DISTINCT {a: cc1.value, b: cc2.value, eid: e.encounterId}) AS cooccurs_triples, "
+        # AI-declared relationships, returned with enough metadata for the
+        # materialiser to locate the source / target nodes by label + key.
+        "collect(DISTINCT {"
+        "  srcLabel: labels(rel_src)[0], srcKey: coalesce(rel_src.value, rel_src.name, rel_src.description),"
+        "  tgtLabel: labels(rel_tgt)[0], tgtKey: coalesce(rel_tgt.value, rel_tgt.name, rel_tgt.description),"
+        "  relType: type(ai_r), evidence: ai_r.evidence, confidence: ai_r.confidence"
+        "}) AS ai_relationships"
     )
     cypher = "\n        ".join(parts)
     return cypher, {"pid": patient_id, "eids": encounter_ids}
+
+
+# Conservative observation → condition map. Each value is a list of
+# substrings that, if present in a condition's value, signal the
+# observation probes that condition. Keep this short and high-precision
+# — a wrong link confuses the reader more than the missing one helps.
+_OBS_TO_CONDITION_SUBSTRINGS: dict[str, tuple[str, ...]] = {
+    "hba1c":             ("diabetes", "dm"),
+    "a1c":               ("diabetes", "dm"),
+    "glucose":           ("diabetes", "dm", "hypoglyc", "hyperglyc"),
+    "blood pressure":    ("hypertension", "htn"),
+    "bp":                ("hypertension", "htn"),
+    "creatinine":        ("kidney", "renal", "ckd"),
+    "egfr":              ("kidney", "renal", "ckd"),
+    "hemoglobin":        ("anemia", "anaemia"),
+    "hb":                ("anemia", "anaemia"),
+    "spo2":              ("copd", "asthma", "pneumonia", "hypoxia"),
+    "ldl":               ("hyperlipid", "dyslipid", "hypercholest"),
+    "hdl":               ("hyperlipid", "dyslipid", "hypercholest"),
+    "ast":               ("hepatitis", "liver", "cirrhosis"),
+    "alt":               ("hepatitis", "liver", "cirrhosis"),
+    "tsh":               ("thyroid", "hypothyroid", "hyperthyroid"),
+    "platelets":         ("thrombocytopen",),
+}
+
+
+def _observation_target_condition(
+    obs: dict[str, Any],
+    cond_id_by_value: dict[str, str],
+    cond_data_by_id: dict[str, dict[str, Any]],
+) -> str | None:
+    """Look up which condition this observation probes, if any.
+
+    Two passes:
+    1. Heuristic substring map — HbA1c probes anything mentioning 'diabetes'.
+    2. If the observation's name is itself a condition value (unlikely but
+       cheap to check), link to that condition.
+
+    Returns the condition's node id, or None when no link applies."""
+    name_cf = (obs.get("name") or "").strip().casefold()
+    if not name_cf:
+        return None
+    # Pass 2 (cheaper, exact-ish): exact name match against a condition value.
+    if name_cf in cond_id_by_value:
+        return cond_id_by_value[name_cf]
+    # Pass 1: heuristic substring map.
+    candidates = _OBS_TO_CONDITION_SUBSTRINGS.get(name_cf, ())
+    if not candidates:
+        return None
+    for cond_cf, cid in cond_id_by_value.items():
+        if any(needle in cond_cf for needle in candidates):
+            return cid
+    return None
+
+
+_COOCCURS_MIN_ENCOUNTERS = 2
+
+
+def _add_cooccurrence_edges(
+    cooccurs_triples: list[dict[str, Any]],
+    cond_id_by_value: dict[str, str],
+    edges: list[dict[str, Any]],
+) -> None:
+    """Link conditions that co-occur across multiple encounters with a
+    faint CO_OCCURS edge.
+
+    Two conditions in the SAME single visit aren't necessarily linked —
+    that's just whatever the clinician documented that day. Two conditions
+    that appear TOGETHER in two or more separate visits is a real
+    comorbidity signal (chronic diabetes + hypertension is the canonical
+    example).
+
+    `cooccurs_triples` comes from Cypher as
+    `[{a: cond1_value, b: cond2_value, eid: encounterId}]`. The pair
+    filter `c1.value < c2.value` upstream gives each unordered (a, b)
+    once per encounter. We count distinct encounters per pair and only
+    emit the edge when the count meets the threshold."""
+    counts: dict[tuple[str, str], set[str]] = {}
+    for t in (cooccurs_triples or []):
+        if not t or not t.get("a") or not t.get("b") or not t.get("eid"):
+            continue
+        a_cf = str(t["a"]).strip().casefold()
+        b_cf = str(t["b"]).strip().casefold()
+        if a_cf == b_cf:
+            continue
+        key = (a_cf, b_cf)
+        counts.setdefault(key, set()).add(str(t["eid"]))
+
+    for (a_cf, b_cf), encs in counts.items():
+        if len(encs) < _COOCCURS_MIN_ENCOUNTERS:
+            continue
+        a_id = cond_id_by_value.get(a_cf)
+        b_id = cond_id_by_value.get(b_cf)
+        if a_id and b_id and a_id != b_id:
+            edges.append({
+                "from": a_id, "to": b_id, "type": "CO_OCCURS",
+                "shared": len(encs),
+            })
 
 
 def _materialize_rows(row: dict[str, Any], *, include_encounters: bool,
@@ -402,34 +788,119 @@ def _materialize_rows(row: dict[str, Any], *, include_encounters: bool,
     def fact_eid(f: dict[str, Any]) -> str | None:
         return f.get("encounterId") if f else None
 
+    # Conditions: always anchor to the patient (or encounter when those are
+    # visible). Track value→node-id so meds/observations/plans can attach
+    # to the condition they relate to instead of all hanging off the patient.
+    cond_id_by_value: dict[str, str] = {}
+    cond_data_by_id: dict[str, dict[str, Any]] = {}
     for c in (row.get("conditions") or []):
         cid = add("Condition", c, "value", source_eid=fact_eid(c))
         if cid:
             attach_from = enc_ids.get(fact_eid(c)) if include_encounters else pid
             if attach_from:
                 edges.append({"from": attach_from, "to": cid, "type": "HAS_CONDITION"})
+            v = (c.get("value") or "").strip().casefold()
+            if v and v not in cond_id_by_value:
+                cond_id_by_value[v] = cid
+                cond_data_by_id[cid] = dict(c)
+
+    # Pre-build the TREATS / ADDRESSES lookup so meds and plans can re-route
+    # straight to their target condition. Pairs come back with a value (not
+    # an id) because Cypher's `collect(DISTINCT {…})` works on the property
+    # values; map them through the value→id index we just built.
+    treats_map: dict[str, str] = {}  # medication name (cf) → condition node id
+    for pair in (row.get("treats_pairs") or []):
+        if not pair or not pair.get("medName") or not pair.get("condValue"):
+            continue
+        cid = cond_id_by_value.get(str(pair["condValue"]).strip().casefold())
+        if cid:
+            treats_map[str(pair["medName"]).strip().casefold()] = cid
+
+    addresses_map: dict[str, str] = {}  # plan description (cf) → condition node id
+    for pair in (row.get("addresses_pairs") or []):
+        if not pair or not pair.get("planDesc") or not pair.get("condValue"):
+            continue
+        cid = cond_id_by_value.get(str(pair["condValue"]).strip().casefold())
+        if cid:
+            addresses_map[str(pair["planDesc"]).strip().casefold()] = cid
+
     for m in (row.get("medications") or []):
         mid = add("Medication", m, "name", source_eid=fact_eid(m))
-        if mid:
+        if not mid:
+            continue
+        # Prefer attaching to the treated condition; only fall back to
+        # patient / encounter when no TREATS edge exists.
+        target_cid = treats_map.get((m.get("name") or "").strip().casefold())
+        if target_cid:
+            edges.append({"from": target_cid, "to": mid, "type": "TREATED_BY"})
+        else:
             attach_from = enc_ids.get(fact_eid(m)) if include_encounters else pid
             if attach_from:
                 edges.append({"from": attach_from, "to": mid, "type": "ON_MEDICATION"})
+
     for o in (row.get("observations") or []):
         oid = add("Observation", o, "name", source_eid=fact_eid(o))
-        if oid:
+        if not oid:
+            continue
+        # Heuristic obs → condition: HbA1c probes diabetes, BP probes
+        # hypertension, etc. Falls back to patient when no match.
+        target_cid = _observation_target_condition(o, cond_id_by_value, cond_data_by_id)
+        if target_cid:
+            edges.append({"from": target_cid, "to": oid, "type": "MONITORED_BY"})
+        else:
             attach_from = enc_ids.get(fact_eid(o)) if include_encounters else pid
             if attach_from:
                 edges.append({"from": attach_from, "to": oid, "type": "HAS_OBSERVATION"})
+
     for pl in (row.get("plans") or []):
         plid = add("Plan", pl, "description", source_eid=fact_eid(pl))
-        if plid:
+        if not plid:
+            continue
+        target_cid = addresses_map.get((pl.get("description") or "").strip().casefold())
+        if target_cid:
+            edges.append({"from": target_cid, "to": plid, "type": "PLAN_FOR"})
+        else:
             attach_from = enc_ids.get(fact_eid(pl)) if include_encounters else pid
             if attach_from:
                 edges.append({"from": attach_from, "to": plid, "type": "HAS_PLAN"})
+
     for a in (row.get("allergies") or []):
         aid = add("Allergy", a, "value")
         if aid and pid:
             edges.append({"from": pid, "to": aid, "type": "HAS_ALLERGY"})
+
+    # Inter-condition co-occurrence: when two conditions are mentioned in
+    # the same encounter, draw a faint link between them. Useful for spotting
+    # comorbid clusters at a glance (e.g. diabetes + hypertension + CKD).
+    _add_cooccurrence_edges(
+        row.get("cooccurs_triples") or [], cond_id_by_value, edges,
+    )
+
+    # AI-declared edges (TREATS / MONITORS / COMPLICATION_OF / DUE_TO / …).
+    # The Cypher returned each row with label + key so we can find the
+    # matching node id from the ones we already added. Match is
+    # case-insensitive so the LLM saying "Diabetes" links to a node
+    # whose value is "diabetes".
+    node_index: dict[tuple[str, str], str] = {}
+    for n in nodes:
+        d = n.get("data") or {}
+        key = d.get("value") or d.get("name") or d.get("description")
+        if key is None:
+            continue
+        node_index[(n["label"], str(key).strip().casefold())] = n["id"]
+    for r in (row.get("ai_relationships") or []):
+        if not r or not r.get("relType"):
+            continue
+        src = node_index.get((r.get("srcLabel") or "", str(r.get("srcKey") or "").strip().casefold()))
+        tgt = node_index.get((r.get("tgtLabel") or "", str(r.get("tgtKey") or "").strip().casefold()))
+        if not src or not tgt or src == tgt:
+            continue
+        edges.append({
+            "from": src, "to": tgt, "type": r["relType"],
+            "evidence": r.get("evidence"),
+            "confidence": r.get("confidence"),
+            "aiDeclared": True,
+        })
 
     if include_documents:
         for d in (row.get("docs") or []):

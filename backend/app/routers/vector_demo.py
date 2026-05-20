@@ -20,5 +20,10 @@ async def rag_ask(req: RagAskRequest) -> RagAskResponse:
 async def patient_vector_search(
     q: str = Query(..., min_length=1, max_length=500),
     limit: int = Query(10, ge=1, le=50),
+    min_score: float = Query(
+        0.35, ge=0.0, le=1.0, alias="minScore",
+        description="Filter out patients whose best match cosine-similarity is below this. "
+                    "0.35 is the default; set to 0 to disable.",
+    ),
 ) -> PatientSearchResponse:
-    return await search_patients(q, limit)
+    return await search_patients(q, limit, min_score)

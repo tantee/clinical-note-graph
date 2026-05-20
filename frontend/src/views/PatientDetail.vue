@@ -20,7 +20,7 @@
       <v-btn class="mr-2" color="primary" variant="tonal" prepend-icon="mdi-text-box-outline" :loading="busy.summary" @click="loadSummary">
         {{ summary ? 'Regenerate summary' : 'Summary' }}
       </v-btn>
-      <v-btn color="primary" variant="tonal" prepend-icon="mdi-medical-bag-outline" :loading="busy.coding" @click="loadCoding">
+      <v-btn color="primary" variant="tonal" prepend-icon="mdi-tag-text-outline" :loading="busy.coding" @click="loadCoding">
         {{ codingResp ? 'Regenerate coding' : 'Coding' }}
       </v-btn>
     </div>
@@ -173,7 +173,11 @@
 
       <!-- Graph -->
       <v-window-item value="graph">
-        <GraphView :data="graph" :height="640" />
+        <!-- patient-id was missing here; GraphView fetches /graph itself
+             and the rebuild button posts /graph/rebuild. Without the prop
+             both calls landed on /api/patient/undefined/... and silently
+             404'd, which looked like "empty graph". -->
+        <GraphView :patient-id="props.id" :height="640" />
       </v-window-item>
 
       <!-- Raw EMR vs facts -->

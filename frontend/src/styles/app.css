@@ -44,14 +44,31 @@ pre.cng-raw.cng-raw-fill {
   max-height: none;
 }
 
+/* The v-app layout reserves space for v-app-bar at the top but does NOT
+   reserve any for the v-footer at the bottom — by default the footer sits
+   beneath v-main but anything inside v-main using 100vh / 100dvh math has
+   to compensate manually. Push v-main up by the footer's height so content
+   never lands underneath the disclaimer. */
+.cng-app .v-main {
+  padding-bottom: 64px;
+}
+
 /* Three-column EMR-vs-facts row: fills the visible viewport below the tabs
    and lets each card scroll its own body. Heights can't be expressed cleanly
    with Vuetify utility classes alone, so keep a single rule for the row.
    The cards themselves use d-flex flex-column h-100 + flex-grow-1 / overflow-y-auto
-   on inner sections — straight Vuetify v4 utility classes. */
+   on inner sections — straight Vuetify v4 utility classes.
+
+   Offset covers: v-app-bar (~64) + v-main padding-bottom (64, see above)
+   + v-container.pa-6 (48) + patient header (~80) + v-tabs (48) + buffer.
+   100dvh handles the mobile address-bar shrink; @supports falls back to
+   100vh on browsers that lack 100dvh. */
 .cng-emr-row {
-  height: calc(100vh - 260px);
+  height: calc(100dvh - 360px);
   min-height: 420px;
+}
+@supports not (height: 100dvh) {
+  .cng-emr-row { height: calc(100vh - 360px); }
 }
 
 .cng-markdown :deep(h1),

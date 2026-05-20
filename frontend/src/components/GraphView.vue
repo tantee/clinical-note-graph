@@ -12,6 +12,18 @@
       </span>
       <v-spacer />
       <span v-if="loading" class="text-caption text-grey-darken-1 mr-2">loading…</span>
+      <v-btn
+        v-if="scope === 'patient'"
+        icon="mdi-refresh"
+        variant="text"
+        size="small"
+        :loading="rebuilding"
+        aria-label="Rebuild graph from Postgres"
+        @click="confirmRebuild = true"
+      >
+        <v-icon>mdi-refresh</v-icon>
+        <v-tooltip activator="parent" location="bottom">Rebuild graph from Postgres</v-tooltip>
+      </v-btn>
       <v-btn icon="mdi-fit-to-page-outline" variant="text" size="small" @click="fit" aria-label="Fit view" />
       <v-btn icon="mdi-cog-outline" variant="text" size="small" @click="filtersOpen = true" aria-label="Filters" />
     </div>
@@ -25,7 +37,41 @@
     <div ref="container" :style="{ height: height + 'px' }" class="graph-canvas" />
 
     <EmptyState v-if="!loading && !data?.nodes?.length && !oversized"
-                icon="mdi-graph-outline" :title="emptyTitle" />
+                icon="mdi-graph-outline" :title="emptyTitle">
+      <template v-if="props.scope === 'patient' && scopeChip === 'all'" #default>
+        <div class="d-flex justify-center mt-3">
+          <v-btn
+            size="small"
+            variant="tonal"
+            color="primary"
+            :loading="rebuilding"
+            prepend-icon="mdi-refresh"
+            @click="confirmRebuild = true"
+          >Rebuild graph from Postgres</v-btn>
+        </div>
+      </template>
+    </EmptyState>
+
+    <!-- Rebuild confirmation — wipe-before-rebuild is destructive on Neo4j
+         even though the source-of-truth Postgres rows are untouched. -->
+    <v-dialog v-model="confirmRebuild" max-width="480">
+      <v-card>
+        <v-card-title class="text-subtitle-1">Rebuild graph from Postgres?</v-card-title>
+        <v-card-text class="text-body-2">
+          This wipes the patient's existing Neo4j subgraph (encounters,
+          documents, conditions, medications, observations, …) and replays
+          the upserts from the Postgres facts. Useful for clearing duplicate
+          nodes from prior rebuilds, or recovering from a silent ingest
+          failure. The Patient node is kept; Postgres rows are not touched.
+          No AI calls.
+        </v-card-text>
+        <v-card-actions>
+          <v-spacer />
+          <v-btn variant="text" @click="confirmRebuild = false">Cancel</v-btn>
+          <v-btn color="primary" :loading="rebuilding" @click="doRebuild">Rebuild</v-btn>
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
 
     <!-- Filter side drawer -->
     <v-navigation-drawer v-model="filtersOpen" location="right" temporary width="320">
@@ -88,7 +134,7 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { Network, DataSet } from 'vis-network/standalone/esm/vis-network'
-import { getGraph, listEncounters } from '../api/client.js'
+import { getGraph, listEncounters, rebuildGraph } from '../api/client.js'
 import { useUiStore } from '../stores/ui.js'
 import EmptyState from './EmptyState.vue'
 
@@ -103,6 +149,8 @@ const ui = useUiStore()
 const container = ref(null)
 const data = ref({ nodes: [], edges: [] })
 const loading = ref(false)
+const rebuilding = ref(false)
+const confirmRebuild = ref(false)
 const oversized = ref(null)
 const filtersOpen = ref(false)
 const pickerOpen = ref(false)
@@ -131,9 +179,23 @@ const filters = reactive({
   reviewStatus: 'hide_rejected',
 })
 
-const emptyTitle = computed(() =>
-  props.scope === 'patient' ? 'No facts to display yet — ingest a note for this patient' :
-  'This encounter has no extracted facts')
+const emptyTitle = computed(() => {
+  if (props.scope !== 'patient') return 'This encounter has no extracted facts'
+  // Patient-scope empty state: tailor the message so the user knows which
+  // filter is producing zero results and how to recover.
+  if (scopeChip.value === 'latest') {
+    return encounterList.value.length
+      ? "Latest encounter has no graph data — try 'All' to see every encounter, or re-ingest if Overview shows facts (Neo4j upsert may have failed)."
+      : 'No encounters yet — ingest a note for this patient.'
+  }
+  if (scopeChip.value === 'pick') {
+    return pickedEncounterIds.value.length
+      ? "Selected encounters have no graph data — try 'All' or pick different encounters."
+      : "Pick at least one encounter to populate the graph."
+  }
+  // scopeChip === 'all'
+  return "No graph data — ingest a note for this patient. If facts already appear on Overview, the Neo4j upsert may have failed during ingest; re-ingest the document from the Documents list."
+})
 
 const filteredEncounterList = computed(() => {
   const q = pickerFilter.value.trim().toLowerCase()
@@ -153,6 +215,13 @@ function themeColors() {
 
 function shortLabel(n) {
   const d = n.data || {}
+  // Observations carry the measurement name on `name` and the reading on
+  // `value` ("Uterine size" / "12 weeks"). Showing only `value` is what made
+  // four different observations all render as e.g. "9*5.9 cm" — combine
+  // both so each node is visually distinct.
+  if (n.label === 'Observation' && d.name) {
+    return d.value ? `${d.name}: ${d.value}` : d.name
+  }
   return d.value || d.name || d.description || d.patientId || d.encounterId || n.label
 }
 function tooltip(n) {
@@ -162,21 +231,87 @@ function tooltip(n) {
 function render() {
   if (!container.value) return
   const { label: labelColor, stroke: strokeColor } = themeColors()
-  const nodes = new DataSet((data.value.nodes || []).map((n) => ({
-    id: n.id,
-    label: shortLabel(n),
-    title: tooltip(n),
-    color: { background: COLORS[n.label] || '#90a4ae', border: '#37474f' },
-    font: { color: labelColor, strokeColor, strokeWidth: 3, size: 12 },
-    shape: 'dot',
-    size: n.label === 'Patient' ? 24 : 14,
-  })))
-  const edges = new DataSet((data.value.edges || []).map((e, i) => ({
-    id: 'e' + i, from: e.from, to: e.to, label: e.type, arrows: 'to',
-    font: { size: 9, color: labelColor, strokeColor, strokeWidth: 3 },
-    color: { color: '#9e9e9e', highlight: '#1f6feb' },
-    smooth: { type: 'continuous' },
-  })))
+  const nodes = new DataSet((data.value.nodes || []).map((n) => {
+    const d = n.data || {}
+    // Severity / status apply to Condition (and Allergy) nodes. Severe /
+    // critical get a red ring; resolved / inactive get muted to a faint
+    // fill so the eye walks past them. Defaults keep the existing tone.
+    const sev = d.severity || null
+    const status = d.status || null
+    let border = '#37474f'
+    let borderWidth = 1.5
+    let bg = COLORS[n.label] || '#90a4ae'
+    if (n.label === 'Condition' || n.label === 'Allergy') {
+      if (sev === 'critical') {
+        border = '#b71c1c'; borderWidth = 4
+      } else if (sev === 'severe') {
+        border = '#e53935'; borderWidth = 3
+      } else if (sev === 'mild') {
+        border = '#43a047'
+      }
+      if (status === 'resolved' || status === 'inactive' || status === 'ruled_out') {
+        // De-saturated muted variant — same hue family, much less ink.
+        bg = '#eceff1'
+        border = '#b0bec5'
+      } else if (status === 'suspected') {
+        // Suspected — dashed border isn't supported by vis-network nodes,
+        // so use a softer tone + thinner border to signal "tentative".
+        border = '#90a4ae'
+        borderWidth = 1
+      }
+    }
+    return {
+      id: n.id,
+      label: shortLabel(n),
+      title: tooltip(n),
+      color: { background: bg, border },
+      borderWidth,
+      font: { color: labelColor, strokeColor, strokeWidth: 3, size: 12 },
+      shape: 'dot',
+      size: n.label === 'Patient' ? 24 : 14,
+    }
+  }))
+  // Edge categories — drives both styling (color, dash, arrow) and how
+  // the rendered label reads. The first two groups are the ones the user
+  // is most likely to scan visually.
+  // - Causal / consequential: COMPLICATION_OF, DUE_TO, CAUSES. Strong
+  //   directionality, painted in a warm tone.
+  // - Therapeutic / monitoring: TREATED_BY, TREATS, MONITORED_BY, MONITORS,
+  //   PLAN_FOR, ADDRESSES, DIAGNOSTIC_OF. Primary tone — the main hierarchy.
+  // - Peer / co-occurrence: CO_OCCURS, RELATED_TO, PANEL_MEMBER_OF. Dashed
+  //   grey, no arrow — these are not hierarchical.
+  // - Sequence: PRECEDES, FOLLOWS. Thin grey arrow.
+  // - Direct parent edges (HAS_CONDITION etc.): plain grey arrow.
+  const CAUSAL = new Set(['COMPLICATION_OF', 'DUE_TO', 'CAUSES'])
+  const HIERARCHICAL = new Set([
+    'TREATED_BY', 'TREATS', 'MONITORED_BY', 'MONITORS',
+    'PLAN_FOR', 'ADDRESSES', 'DIAGNOSTIC_OF',
+  ])
+  const PEER = new Set(['CO_OCCURS', 'RELATED_TO', 'PANEL_MEMBER_OF'])
+  const SEQUENCE = new Set(['PRECEDES', 'FOLLOWS'])
+
+  const edges = new DataSet((data.value.edges || []).map((e, i) => {
+    const isCausal = CAUSAL.has(e.type)
+    const isHierarchical = HIERARCHICAL.has(e.type)
+    const isPeer = PEER.has(e.type)
+    const isSequence = SEQUENCE.has(e.type)
+    return {
+      id: 'e' + i, from: e.from, to: e.to, label: e.type,
+      arrows: isPeer ? '' : 'to',
+      dashes: isPeer ? [2, 4] : (isSequence ? [4, 2] : false),
+      font: { size: 9, color: labelColor, strokeColor, strokeWidth: 3 },
+      color: {
+        color: isCausal ? '#e53935'
+             : isHierarchical ? '#1f6feb'
+             : isPeer ? '#cfd8dc'
+             : isSequence ? '#90a4ae'
+             : '#9e9e9e',
+        highlight: '#1f6feb',
+      },
+      width: isCausal ? 2 : 1,
+      smooth: { type: 'continuous' },
+    }
+  }))
   if (network) network.destroy()
   network = new Network(container.value, { nodes, edges }, {
     physics: { stabilization: { iterations: 200 }, barnesHut: { springLength: 140 } },
@@ -251,6 +386,27 @@ async function load() {
     render()
   } finally {
     loading.value = false
+  }
+}
+
+async function doRebuild() {
+  // Recovery + dedupe path: wipes the patient subgraph, then replays
+  // graph_updater against the rows already in Postgres. No AI calls.
+  rebuilding.value = true
+  try {
+    const summary = await rebuildGraph(props.patientId)
+    confirmRebuild.value = false
+    const withErrors = (summary.perDocument || []).filter((d) => d.error)
+    if (withErrors.length) {
+      ui.error(`Graph rebuild produced errors on ${withErrors.length} document(s) — check backend logs.`)
+    } else {
+      ui.success(`Graph rebuilt from ${summary.documents} document(s).`)
+    }
+    await load()
+  } catch (err) {
+    // Surfaced by axios interceptor's snackbar; nothing more to do here.
+  } finally {
+    rebuilding.value = false
   }
 }
 
