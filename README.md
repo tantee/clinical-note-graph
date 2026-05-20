@@ -14,6 +14,17 @@ A Dockerised prototype that turns inbound EMR documents into:
 
 > ⚠️ **AI-assisted output requires clinical review.** No diagnosis or coding suggestion is ever marked as final.
 
+## Documentation
+
+| Page | When to read |
+|---|---|
+| [docs/ai-providers.md](docs/ai-providers.md) | Configure OpenRouter / OpenAI / Groq / self-host; per-task model overrides; cost-effective preset stacks. |
+| [docs/api.md](docs/api.md) | HTTP API surface, Neo4j graph model, markdown vault layout. |
+| [docs/operations.md](docs/operations.md) | Async ingest queue, cost tracking, the test pyramid (unit → integration → e2e). |
+| [docs/deployment.md](docs/deployment.md) | Production overlay (Caddy + Let's Encrypt), required env vars, operational endpoints. |
+| [docs/compliance.md](docs/compliance.md) | **Read before pointing at real data.** PHI dataflow audit, HIPAA / GDPR / PDPA framing, de-identification, regulatory posture. |
+| [docs/changelog.md](docs/changelog.md) | Notable structural changes since the MVP first draft. |
+
 ---
 
 ## Tech choices
@@ -50,7 +61,7 @@ POST /api/emr/ingest
 [Audit log + AI output snapshot]
 ```
 
-The AI never writes to the database directly. Its JSON is parsed, validated, and only its **typed output** flows into the deterministic update layer.
+The AI never writes to the database directly. Its JSON is parsed, validated, and only its **typed output** flows into the deterministic update layer. Every outbound payload also passes through a HIPAA Safe Harbor redactor — see [docs/compliance.md](docs/compliance.md).
 
 ---
 
@@ -60,7 +71,6 @@ The AI never writes to the database directly. Its JSON is parsed, validated, and
 git clone <this-repo>
 cd clinical-note-graph
 cp .env.example .env   # default uses the offline mock AI provider
-
 docker compose up --build
 ```
 
@@ -81,324 +91,7 @@ Try the demo:
 open http://localhost/#/patients/HN123456                  # explore via the unified Caddy proxy
 ```
 
-## Configuring the AI provider
-
-Any OpenAI-compatible endpoint works. The backend speaks the standard `/chat/completions` and `/embeddings` shape, so `AI_PROVIDER=openai` is reused for all of them — only the `AI_BASE_URL` changes.
-
-You can configure providers three ways:
-- Edit `.env` and restart `docker compose up`.
-- `PATCH /api/config` — overrides are stored in Postgres and merged into runtime settings without restarting.
-- Visit `/#/config` in the UI and click **Quick setup** — it fills OpenRouter / OpenAI / Groq presets so you only need to paste your key.
-
-You can also use a different model **per task** (extract, summary, coding) on top of a single provider — see [Per-task model overrides](#per-task-model-overrides) below.
-
-### Provider quick-reference
-
-| Provider | Key URL | `AI_BASE_URL` | Notes |
-|---|---|---|---|
-| **OpenRouter** (recommended) | <https://openrouter.ai/keys> | `https://openrouter.ai/api/v1` | One key → 200+ models incl. Claude, GPT-4o, Gemini, Llama, Qwen. Pay-per-use, no monthly commitment. Embeddings supported via `openai/text-embedding-3-*`. |
-| **OpenAI** | <https://platform.openai.com/api-keys> | `https://api.openai.com/v1` | Native; best for `gpt-4o`, `gpt-4o-mini`, OpenAI embeddings. |
-| **Anthropic via OpenRouter** | as above | as above | Use `AI_MODEL=anthropic/claude-3.5-sonnet` (or `claude-3.7-sonnet`, `claude-3.5-haiku`). Direct Anthropic API uses a different schema and isn't supported by this backend yet. |
-| **Google Gemini via OpenRouter** | as above | as above | Use `AI_MODEL=google/gemini-2.0-flash-001` or `google/gemini-2.5-pro`. |
-| **Groq** | <https://console.groq.com/keys> | `https://api.groq.com/openai/v1` | Very fast inference; good for `llama-3.3-70b-versatile`, `qwen-2.5-72b`. No embedding endpoint — leave `AI_EMBEDDING_MODEL` blank or point at OpenAI for embeddings. |
-| **DeepSeek** | <https://platform.deepseek.com/api_keys> | `https://api.deepseek.com/v1` | Cheap; use `deepseek-chat` (V3) or `deepseek-reasoner` (R1). Reasoner is slow but good at structured extraction. |
-| **Azure OpenAI** | Azure portal | `https://<resource>.openai.azure.com/openai/deployments/<deployment>` | Set `AI_MODEL` to your deployment name. |
-| **Local (vLLM / LM Studio / Ollama)** | n/a | `http://host:port/v1` | Any OpenAI-compatible self-hosted server. From a container, use `host.docker.internal` or the LAN IP. |
-| **Mock / offline** | n/a | leave blank, set `AI_PROVIDER=mock` | Deterministic keyword-based extractor with ICD-10 / SNOMED / LOINC / RxNorm lookups. Runs without a key. |
-
-### OpenRouter setup (recommended)
-
-OpenRouter exposes hundreds of models behind a single key, including the latest Claude, GPT, Gemini, Llama, Qwen, and DeepSeek. The cheapest way to compare models without juggling vendor accounts.
-
-1. Get an API key at <https://openrouter.ai/keys>.
-2. Edit `.env`:
-
-   ```env
-   AI_PROVIDER=openai
-   AI_BASE_URL=https://openrouter.ai/api/v1
-   AI_API_KEY=sk-or-v1-…
-   AI_MODEL=anthropic/claude-3.5-sonnet
-   AI_EMBEDDING_MODEL=openai/text-embedding-3-small
-   ```
-
-3. `docker compose up --build`. Or change it live without restart via the Config page or:
-
-   ```bash
-   curl -X PATCH http://localhost:8000/api/config \
-     -H 'Content-Type: application/json' \
-     -d '{"AI_PROVIDER":"openai","AI_BASE_URL":"https://openrouter.ai/api/v1","AI_API_KEY":"sk-or-v1-...","AI_MODEL":"anthropic/claude-3.5-sonnet"}'
-   ```
-
-### Per-task model overrides
-
-Two knobs cover the basic case: `AI_MODEL` (default chat model) + `AI_EMBEDDING_MODEL` (embeddings). They apply to **every** chat call (`extract`, `summary`, `coding`) and every embed call respectively.
-
-If you want a stronger model for the strict-JSON extract step but a cheap one for summaries, set the per-task overrides. Each falls back to `AI_MODEL` when blank:
-
-| Env var | What it overrides |
-|---|---|
-| `AI_MODEL` | Default for any chat task that doesn't have a per-task override |
-| `AI_MODEL_EXTRACT` | `POST /api/emr/ingest` — the strict-JSON extraction call |
-| `AI_MODEL_SUMMARY` | `POST /api/patient/{id}/summary` |
-| `AI_MODEL_CODING` | `POST /api/patient/{id}/coding/suggest` |
-| `AI_EMBEDDING_MODEL` | Every `embed` call (per-note + per-problem) |
-
-Example `.env`:
-
-```env
-AI_PROVIDER=openai
-AI_BASE_URL=https://openrouter.ai/api/v1
-AI_API_KEY=sk-or-v1-…
-
-# Best schema-following model for the heavy extraction step…
-AI_MODEL_EXTRACT=anthropic/claude-3.5-sonnet
-
-# …a cheap model for the cosmetic summary…
-AI_MODEL_SUMMARY=openai/gpt-4o-mini
-
-# …and the default catches anything else (coding, future call types).
-AI_MODEL=anthropic/claude-3.5-haiku
-
-AI_EMBEDDING_MODEL=openai/text-embedding-3-small
-```
-
-Three ways to change them (any one works, all merge into the same effective settings):
-
-1. **UI** — `/#/config` → AI provider card → fill in the per-task fields → Save.
-2. **API** — `PATCH /api/config` with any subset of the keys:
-
-   ```bash
-   curl -X PATCH http://localhost/api/config \
-     -H 'Content-Type: application/json' \
-     -d '{
-       "AI_MODEL": "anthropic/claude-3.5-haiku",
-       "AI_MODEL_EXTRACT": "anthropic/claude-3.5-sonnet",
-       "AI_MODEL_SUMMARY": "openai/gpt-4o-mini"
-     }'
-   ```
-
-   The overrides land in the `app_config` table and merge into `Settings` on every read — no restart required.
-3. **`.env`** — set the env vars and `docker compose up`. Persistent DB overrides (1 + 2) take precedence over env defaults.
-
-The Debug page's *By model* table breaks down spend per actual model used, so you can A/B different choices and compare token + dollar costs side-by-side.
-
-### Cost-effective preset stacks
-
-Three drop-in presets ship at the repo root. Pick one based on the trade-offs below, copy its `AI_*` lines into `.env`, replace the API key, and `docker compose up` — or paste them into `PATCH /api/config` for a live swap.
-
-| Preset file | Stack | Realized cost / encounter¹ |
-|---|---|---|
-| `.env.option.deepseek` | DeepSeek V3.1 + GLM-4.5-Air + DeepSeek R1 (OSS Chinese) | ~$0.013 |
-| `.env.option.gemini` | Gemini 2.5 Flash + Flash-Lite + GPT-5-mini (Western, cost-only) | ~$0.011 |
-| `.env.option.hybrid` | Gemini Flash + GLM-Air + GPT-5-mini (recommended mix) | **~$0.0095** |
-
-¹ Assumes a typical encounter: extract ≈ 6K in / 1.5K out, summary ≈ 2K in / 0.7K out, coding ≈ 4K in / 0.8K answer + reasoning. OpenRouter list rates, January 2026.
-
-#### Headline price comparison (per 1M tokens, in / out)
-
-| Slot | DeepSeek/GLM | Gemini/GPT-5 |
-|---|---|---|
-| extract | `deepseek-chat-v3.1` — **$0.27 / $1.10** | `gemini-2.5-flash` — $0.30 / $2.50 |
-| summary | `glm-4.5-air` — ~$0.20 / $1.10 | `gemini-2.5-flash-lite` — **$0.10 / $0.40** |
-| coding | `deepseek-r1-0528` — $0.55 / $2.19 | `gpt-5-mini` — **$0.25 / $2.00** |
-| embeddings | `text-embedding-3-small` — $0.02 (both) | same |
-
-Headline rates favour DeepSeek, but R1's reasoning-token bill (often 2–5× the answer length, charged as output) flips the realized total. Bounded reasoning on `gpt-5-mini` is why the Gemini and Hybrid stacks finish cheaper end-to-end.
-
-#### Pros / cons
-
-**DeepSeek + GLM (`.env.option.deepseek`)**
-- ✅ Lowest input-token price across the board — wins big on long-note / extract-heavy workloads.
-- ✅ Open weights — can self-host the same models later for data residency / on-prem / air-gapped deployments.
-- ✅ R1's chain-of-thought is genuinely strong on multi-step medical reasoning (conflicting findings, ICD specificity).
-- ❌ R1 burns reasoning tokens — coding spend is unpredictable.
-- ❌ Latency: R1 can take 10–30s per coding call. Fine inside the async ingest pipeline, painful for a synchronous "suggest codes now" UI.
-- ❌ Weaker Western clinical priors than GPT/Gemini; expect worse ICD specificity on rare conditions.
-- ❌ Data residency: OpenRouter sometimes routes DeepSeek/Z.AI through Chinese-hosted upstreams — pin providers or move off OpenRouter if you process real PHI.
-
-**Gemini + GPT-5-mini (`.env.option.gemini`)**
-- ✅ Lower realized cost on coding (gpt-5-mini's reasoning is bounded vs R1).
-- ✅ Fast: Gemini Flash and GPT-5-mini both respond in 1–4s.
-- ✅ Stronger medical priors — richer clinical training data.
-- ✅ Gemini structured-output is the gold standard for strict JSON — fewer retry-on-malformed-JSON cycles.
-- ✅ US/EU-hosted upstreams; predictable for compliance reviews.
-- ❌ Closed weights — no self-host escape hatch.
-- ❌ Vendor lock to two big-lab APIs — slightly more concentrated risk.
-
-**Hybrid (`.env.option.hybrid`) — recommended**
-- ✅ Gemini Flash keeps extract reliability; GLM-Air keeps summary dirt cheap with better prose than Flash-Lite; gpt-5-mini handles coding without R1's latency tax.
-- ✅ Cheapest realized cost of the three documented presets.
-- ❌ Three different upstream providers — more billing dashboards if you ever leave OpenRouter.
-
-#### When to pick which
-
-- High volume, short notes, no PHI concerns → **deepseek**. Low input prices dominate, R1's reasoning amortizes over simple cases.
-- Complex cases, accuracy-sensitive coding, future PHI workload → **gemini**. Bounded reasoning, better priors, cleaner compliance.
-- Best balance of cost, accuracy, and latency → **hybrid**.
-
-After a few real ingests, check the Debug → *By model* table to see actual spend by model — if `coding` dominates, swap `AI_MODEL_CODING` for the same model you use on `extract` (typically a 30–40% total-cost cut at marginal quality impact on routine cases).
-
-> ⚠️ Verify exact model slugs at <https://openrouter.ai/models> before applying — OpenRouter occasionally renames variants (e.g. dated suffixes like `-0528`). The slugs above match what was current at preset authoring time (2026-05).
-
----
-
-## Production deployment
-
-The production overlay (`docker-compose.prod.yml`) collapses the dev `proxy` + `frontend` services into a single **Caddy** container that:
-
-- compiles the frontend at image-build time and serves the static bundle from `/srv`,
-- reverse-proxies `/api/*`, `/docs`, `/openapi.json`, `/redoc`, `/health`, `/ready` to the backend on the internal docker network,
-- handles TLS termination — when `CNG_DOMAIN` is a real public hostname, Caddy auto-fetches a Let's Encrypt cert via ACME HTTP-01 (ports 80 and 443 must be Internet-reachable),
-- gzip/zstd-encodes responses, immutable-caches hashed assets, sets HSTS + `X-Frame-Options` + `X-Content-Type-Options` + `Referrer-Policy`,
-- closes Postgres / Neo4j / backend ports to the outside (only the proxy is exposed),
-- enforces a CORS allowlist and an `X-API-Key` header on protected endpoints,
-- adds health-checks to every service and `restart: always`.
-
-Required env vars for prod:
-
-```env
-CNG_DOMAIN=cng.example.com                     # Caddy serves this host; auto-TLS via Let's Encrypt
-CADDY_EMAIL=ops@example.com                    # cert renewal notifications
-VITE_API_BASE=https://cng.example.com          # baked into the frontend bundle; same host since Caddy fronts both
-FRONTEND_ORIGIN=https://cng.example.com        # CORS allowlist for the backend
-BACKEND_API_KEY=<long random secret>           # required for /api/emr, /api/config, /api/export, /api/facts
-UVICORN_WORKERS=4
-```
-
-```bash
-docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
-```
-
-Local prod testing without a real domain: set `CNG_DOMAIN=localhost` and Caddy serves plain HTTP on :80. Useful for smoke-testing the prod overlay before pointing DNS.
-
-Operational endpoints (served through the same Caddy proxy):
-
-- `GET /health` — 200 whenever the backend process is up.
-- `GET /ready` — 200 only when Postgres responds.
-- Every response includes an `X-Request-ID` header that also appears in JSON 500/422 bodies for tracing.
-
-If you'd rather run nginx than Caddy as the front-door, the Caddyfiles are short — swap them for an equivalent `server { … proxy_pass http://backend:8000; … }` block and use `proxy_pass http://frontend:5173` (or `root /srv` in prod). Caddy was chosen here because the auto-HTTPS path is one config line and one env var.
-
----
-
-## Async ingest
-
-`POST /api/emr/ingest` defaults to **asynchronous** processing. The request returns immediately with:
-
-```json
-{ "jobId": "…", "status": "queued", "patientId": "HN1", "encounterId": "", "documentId": "doc-001", "summary": null }
-```
-
-Poll `GET /api/jobs/{jobId}` until the status is `completed` or `failed`. The `progress` JSONB field on the job row updates per stage (`stage_persisted` → `stage_ai_extract` → `stage_facts` → `stage_graph_and_markdown` → `stage_embed`), and `stage_ai_extract` carries the model, tokens, latency, and cost. The UI's `JobWatcher` component shows this live.
-
-For inline behaviour (no queue), append `?async=false`:
-
-```bash
-curl -X POST 'http://localhost/api/emr/ingest?async=false' -H 'Content-Type: application/json' -d @body.json
-```
-
-The sync response includes a `summary` block with the extracted counts and a list of generated Markdown files. Used by `examples/ingest.sh`.
-
----
-
-## Cost tracking
-
-Every AI call is metered into the `ai_outputs` table: `prompt_tokens`, `completion_tokens`, `total_tokens`, `latency_ms`, `cost_usd`. Cost is computed at write time using rates from the `model_pricing` table, which:
-
-- Ships with seed rows for current major models (gpt-4o, gpt-4o-mini, claude-3.5-sonnet/haiku, gemini-2.0-flash, deepseek-chat, text-embedding-3-small, …).
-- Is editable per-row in the Config page (Model pricing card).
-- Supports a single-click "Refresh from OpenRouter" button that fetches `https://openrouter.ai/api/v1/models` and upserts pricing for any matching IDs.
-
-Models without a pricing row record a NULL cost and the debug page renders `?` in the Cost column. The mock provider is seeded at $0 so dev runs don't inflate spend totals.
-
-The Debug page (`/#/debug`) surfaces:
-
-- Total spend / AI calls / avg latency / failures over a chosen date range.
-- Per-model breakdown table (calls, tokens, cost).
-- A virtualised AI-calls log with model / status / text filters, plus a streamed CSV export.
-- A jobs view with a re-queue button for failed jobs.
-
-All `/api/debug/*` endpoints are protected by the same `X-API-Key` middleware as `/api/config` and `/api/emr`.
-
----
-
-## API surface
-
-| Verb | Path | Purpose |
-|---|---|---|
-| POST | `/api/emr/ingest` | Accept text / JSON / FHIR EMR document. Idempotent on `(patientId, source.documentId, source.version)`. Pass `?async=true` to enqueue. |
-| GET  | `/api/jobs/{jobId}` | Background job status |
-| GET  | `/api/patients` | Search/list patients |
-| GET  | `/api/patient/{id}` | Aggregated structured facts |
-| GET  | `/api/patient/{id}/timeline` | Encounters timeline (single SQL round-trip with counts) |
-| GET  | `/api/patient/{id}/encounter/{eid}/documents` | Documents for one encounter |
-| GET  | `/api/patient/{id}/document/{docId}?includeRaw=false` | Raw EMR + facts + latest AI output for one document |
-| GET  | `/api/patient/{id}/graph` | Graph (nodes + edges) |
-| GET  | `/api/patient/{id}/notes` · `/note?path=…` | List + read vault files; backlinks included |
-| POST | `/api/patient/{id}/summary` | brief / detailed / discharge / problem_oriented / timeline / coding_support |
-| POST | `/api/patient/{id}/coding/suggest` | ICD-10 / SNOMED CT / LOINC / RxNorm candidates |
-| PATCH| `/api/facts/{factId}/review?status=` | Set `ai_suggested` / `human_confirmed` / `rejected` |
-| GET  | `/api/search?q=…&patientId=…` | Vector search across facts + notes |
-| POST | `/api/export` | summary · coding · graph · markdown_vault (zip) · fhir_bundle · custom (uses export profile) |
-| GET/PATCH | `/api/config` | Read effective settings (masked secrets), patch overrides |
-| GET/PUT/DELETE | `/api/config/export-profiles[/{id}]` | Manage export profiles |
-| GET  | `/api/jobs?status=&type=&limit=&offset=` | List background jobs (queue) |
-| POST | `/api/jobs/{id}/requeue`                 | Reset a failed job to pending |
-| GET  | `/api/debug/summary?start=&end=`         | KPI totals over a range |
-| GET  | `/api/debug/by-model?start=&end=`        | Per-model breakdown |
-| GET  | `/api/debug/by-day?start=&end=`          | Stacked-bar dataset |
-| GET  | `/api/debug/ai-calls?…`                  | AI call log (filterable) |
-| GET  | `/api/debug/ai-calls/{id}`               | Single call detail |
-| GET  | `/api/debug/ai-calls.csv?…`              | Streamed CSV export |
-| GET  | `/api/config/pricing`                    | List model rates |
-| PUT  | `/api/config/pricing/{model}`            | Upsert one rate |
-| DEL  | `/api/config/pricing/{model}`            | Delete a rate |
-| POST | `/api/config/pricing/refresh-openrouter` | Refresh rates from OpenRouter |
-
-Full schema at `http://localhost:8000/docs` (OpenAPI).
-
-Examples:
-- Curl walkthrough: [`examples/ingest.sh`](examples/ingest.sh)
-- Cypher queries: [`examples/graph-query.cypher`](examples/graph-query.cypher)
-- Coding response: [`examples/coding-response.json`](examples/coding-response.json)
-- Generated vault: [`examples/example-vault/`](examples/example-vault/)
-
----
-
-## Graph model
-
-```
-(Patient)-[:HAS_ENCOUNTER]->(Encounter)
-(Encounter)-[:HAS_DOCUMENT]->(Document)
-(Encounter)-[:MENTIONS]->(Condition)
-(Encounter)-[:PRESCRIBED]->(Medication)
-(Encounter)-[:HAS_OBSERVATION]->(Observation)
-(Encounter)-[:HAS_PLAN]->(Plan)
-(Encounter)-[:PERFORMED]->(Procedure)
-(Patient)-[:HAS_ALLERGY]->(Allergy)
-(Medication)-[:TREATS]->(Condition)
-(Plan)-[:ADDRESSES]->(Condition)
-(CodingCandidate)-[:CODES]->(Condition)
-(Document)-[:EXTRACTED {evidence,confidence}]->(Condition|Medication|Observation|…)
-```
-
-All upserts are **longitudinal** — new documents add facts and link them; they never delete prior facts. Contradictions surface as `warnings[]` in `ClinicalExtractionResult` and are visible in the UI.
-
----
-
-## Markdown vault layout
-
-```
-/data/vault/patients/{patientId}/
-   index.md
-   visits/{date}-{encounterType}.md
-   problems/{slug}.md
-   medications/{slug}.md
-   labs/{slug}.md
-   sources/{documentId}.md
-```
-
-Every file has YAML frontmatter, `[[wikilinks]]`, an Evidence section quoting the raw EMR, a Timeline, and `updatedAt`. Compatible with vanilla Obsidian — mount the volume into your Obsidian vault folder for a side-by-side workflow.
+To point at a real AI provider, edit `.env` and follow [docs/ai-providers.md](docs/ai-providers.md).
 
 ---
 
@@ -408,47 +101,9 @@ Every file has YAML frontmatter, `[[wikilinks]]`, an Evidence section quoting th
 - If validation fails, the AI output is logged in `ai_outputs` with errors, an `EXTRACTION_INVALID` audit event is written, and **no downstream writes happen** (no facts, no graph, no markdown, no embeddings).
 - Every fact carries `evidenceText`, `confidence`, and `reviewStatus` (`ai_suggested` / `human_confirmed` / `rejected`).
 - Every AI call is stored in `ai_outputs`; every state change is logged in `audit_log`; raw documents are kept verbatim in `documents`.
+- Outbound AI payloads are de-identified by default — see [docs/compliance.md](docs/compliance.md).
 - Coding suggestions and summaries always include a disclaimer.
 - The web UI shows a persistent warning chip on every page.
-
----
-
-## Testing
-
-Three layers — all live under `backend/tests/` and `frontend/tests/`.
-
-### Unit tests (backend, no docker)
-```bash
-cd backend
-pip install -r requirements.txt
-pytest -q
-```
-Covers: extraction schema strictness, mock extractor, FHIR adapter, markdown longitudinal append.
-
-### Integration tests (backend, no docker)
-Same `pytest` run. The suite includes an in-process FastAPI `TestClient` with an in-memory Postgres fake and stubbed Neo4j (`conftest.py` provides `fake_store`, `stub_neo4j`, and `app_client` fixtures), so every API endpoint is exercised end-to-end through the FastAPI ASGI app without containers. Includes:
-
-- `test_api_ingest.py` — text ingest, idempotency, 404 semantics, encounter-documents endpoint, config patch (with secret masking), API-key middleware enforcement, summary, coding, export.
-- `test_api_fhir_and_longitudinal.py` — FHIR ingest, two-document longitudinal merge.
-- `test_graph_updater.py` — verifies the Cypher path issues `UNWIND` batches instead of per-fact round-trips.
-- `test_embeddings_batching.py` — proves the embed step is concurrent-bounded and tolerates per-item failures.
-- `test_runtime_config.py` — DB overrides are merged in without mutating the cached `Settings` singleton.
-
-### End-to-end smoke (live stack)
-```bash
-./scripts/e2e.sh
-```
-Boots the full compose stack, waits for `/health`, and runs `pytest -m e2e` from inside the backend container against the real Postgres + Neo4j + pgvector + markdown vault. Use `API_KEY=somethingsecret ./scripts/e2e.sh` to also exercise the API-key middleware.
-
-### Frontend
-```bash
-cd frontend
-npm install
-npm run test        # Vitest: utils + MarkdownViewer
-npm run e2e         # Playwright: ingest → patient view (needs the stack up)
-```
-
-The Playwright suite drives the real browser through the ingest form, opens the patient page, and asserts the timeline + notes render. It assumes the stack is already up (`docker compose up -d`); set `E2E_BASE_URL` to point at a different host if needed.
 
 ---
 
@@ -462,6 +117,7 @@ backend/
     schemas/{common,emr,extraction,coding}.py
     services/
       ai_provider.py         (mock + OpenAI-compatible providers)
+      deidentify.py          (HIPAA Safe Harbor redactor)
       ingest.py              (orchestrator: pre-AI tx → AI → post-AI tx → parallel side-effects)
       graph_updater.py       (UNWIND-batched Cypher in one session)
       markdown_generator.py  (entity-note helper unifies problem/med/lab writers)
@@ -471,8 +127,8 @@ backend/
     routers/{emr,patient,config,export,jobs}.py
     prompts/templates.py
     utils/{datetime,vault}.py
-  tests/  conftest.py + 8 test modules
-  db/init/001_schema.sql
+  tests/  conftest.py + test modules (unit + integration + de-identify)
+  db/init/00*_schema.sql
 
 frontend/
   src/
@@ -483,253 +139,11 @@ frontend/
     stores/ui.js               (Pinia: theme, snackbar)
     views/{Patients,PatientDetail,Ingest,Config}.vue
     components/{MarkdownViewer,GraphView,Timeline,SectionHeader,EmptyState,FactCard}.vue
-  tests/  setup.js · utils.format.spec.js · MarkdownViewer.spec.js · e2e/
+  tests/  setup.js · *.spec.js · e2e/
 
+docs/         topical documentation (see Documentation index above)
 sample-data/  3 text EMRs + 1 FHIR bundle
 examples/     curl walkthrough, sample coding response, cypher queries, vault tree
 scripts/      e2e.sh
 docker-compose.yml + docker-compose.prod.yml
 ```
-
----
-
-## What changed since MVP first draft
-
-A full review-and-polish pass landed before this release. Highlights:
-
-**Correctness**
-- Ingest is now three crisp stages, each in its own Postgres transaction; AI validation failures stop downstream writes instead of writing empty results.
-- `Settings` singleton is no longer mutated by config patches — overrides are merged into a fresh object at read time (`runtime_config.effective()`).
-- Fixed a real collision bug where two ingests in the same second produced the same auto-generated encounter_id.
-- `MarkdownViewer` no longer registers a global `document.click` listener that leaked across mounts; wikilinks now actually emit `open` to the parent.
-- Audit log payloads use `json.dumps`, not string concatenation.
-- API-key middleware returns a proper 401 JSON response instead of relying on `raise` inside `BaseHTTPMiddleware`.
-
-**Performance**
-- Neo4j writes use `UNWIND $rows` in one session per ingest (was 30+ round-trips for a typical document).
-- Postgres fact inserts use `executemany` (was one round-trip per fact).
-- Embeddings run with bounded concurrency and a single batched insert.
-- Frontend `PatientDetail` loads the four independent endpoints in parallel; in-flight requests are aborted on navigation away.
-- Tab content is lazy — Graph and AI-output tabs don't mount until selected.
-- Neo4j constraints are created once at startup, gated by a module-level flag (was re-running on every ingest).
-
-**Security / deployment**
-- CORS reads a comma-separated allowlist from `CORS_ORIGINS`. Production overlay requires a real origin.
-- Optional `X-API-Key` middleware on `/api/emr`, `/api/config`, `/api/export`, `/api/facts`.
-- Multi-stage frontend Dockerfile + nginx with gzip, immutable asset caching, security headers.
-- Backend runs as a non-root user in the image.
-- `X-Request-ID` middleware + request log line on every response.
-- `lifespan` replaces deprecated `on_event`; startup constraint loop runs in a thread, not blocking the loop.
-
-**UI / UX**
-- Light + dark theme with a persisted toggle.
-- Pinia `ui` store powers a global error snackbar for all axios failures.
-- Empty states, skeleton-equivalent loading, accessible button labels, sticky AI-assisted warning chip.
-- Reusable `SectionHeader`, `EmptyState`, `FactCard` components.
-- Graph view has a legend and Fit-to-view; cleanup-on-unmount is correct.
-
-**Tests**
-- 36 backend tests (unit + integration with in-memory fake stores).
-- E2E smoke (`scripts/e2e.sh`) against the real compose stack.
-- Frontend Vitest + Vue Test Utils + Playwright browser E2E.
-
----
-
-## Compliance & data handling
-
-> **TL;DR:** This is a **prototype**. The default `AI_PROVIDER=mock` sends nothing
-> off the host. Any other provider sends Protected Health Information (PHI) to
-> a third party — that's a regulated activity in most jurisdictions. **Do not
-> point this at real patient data without a privacy/security review.**
-
-### What leaves the host when AI_PROVIDER is not `mock`
-
-Five distinct call types each ship PHI-bearing text over HTTPS to whatever
-endpoint `AI_BASE_URL` resolves to:
-
-| Call | Endpoint | What's in the body |
-|---|---|---|
-| **extract** (per ingest) | `/v1/chat/completions` | Patient ID, encounter type, encounter date/time, document ID, **the full raw EMR text** (which typically contains patient name, DOB, clinical narrative) |
-| **summary** / **coding** | `/v1/chat/completions` | A JSON-serialised `patient_facts` dict — patient row (HN/name/gender/birth_date/metadata), every encounter, every extracted fact (conditions, meds, observations, plans, allergies, diagnoses) with original `evidenceText` |
-| **embed** (per fact + per markdown note at ingest, plus once per search query) | `/v1/embeddings` | Per-fact content + per-note markdown; for search, the user's free-text query |
-| **rag** (Vector demo Q&A) | `/v1/chat/completions` | User's question + top-K retrieved chunks (PHI verbatim) + optional chat history |
-| **audit row** | DB only | A row is written to `ai_outputs` for every call above (model, tokens, cost, latency, raw response). Stays local in Postgres — never re-sent outbound. |
-
-Embeddings stored in pgvector also contain the source text verbatim — that's
-how vector search returns snippets. If you back up Postgres, that backup
-contains PHI.
-
-### Where the data actually lands
-
-The endpoint matters more than the model name. Same model behind different
-providers means different jurisdictions, different retention policies,
-different contracts.
-
-| Provider | Host(s) | BAA available? | Notes |
-|---|---|---|---|
-| **mock** (default) | localhost only | n/a | No outbound calls. Safe for any data. |
-| **OpenAI** direct (`api.openai.com`) | US | Yes, on **OpenAI Enterprise/Healthcare**; **not** on standard tier | Standard tier inputs may be used to improve services unless you opt out; Enterprise is separately contracted. Always verify with OpenAI's current ToS. |
-| **OpenRouter** (`openrouter.ai`) | Routes to many upstreams (DeepInfra, Together, Novita, Z.AI, WandB, Google, AtlasCloud, …) | **No** | Each upstream has its own jurisdiction and policy. DeepSeek and GLM are usually served by Chinese-hosted providers. |
-| **Self-hosted** (vLLM, Ollama, llama.cpp on your network) | Your host | n/a — you're the operator | The compliance burden moves to you (encryption at rest, access control, audit), but no third-party PHI transfer occurs. |
-
-### Regulatory framing (informational — not legal advice)
-
-- **HIPAA (US)** — PHI sent to a third-party processor requires a signed
-  Business Associate Agreement (BAA). Inputs in the table above qualify as
-  PHI under §164.514. Sending PHI to a provider without a BAA is a reportable
-  breach.
-- **GDPR (EU/UK)** — Health data is "special category" under Art. 9. Lawful
-  basis (consent or Art. 9(2)(h) healthcare provision) plus an Art. 28
-  processor contract is required. Cross-border transfers (e.g. EU → US)
-  need an SCC + transfer impact assessment.
-- **PDPA (Thailand)** — Sensitive personal data under §26 requires explicit
-  consent. Cross-border transfer rules (§28) require adequate-protection
-  determinations or explicit consent. The sample data ships with Thai
-  clinical text — that's a deliberate signal that this codebase is built
-  with Thai healthcare in mind, and PDPA applies the moment real patients
-  are involved.
-
-### Mitigations to reach for before production-like use
-
-In rough order of how much they reduce risk:
-
-1. **Keep `AI_PROVIDER=mock`** for demos, screenshots, and conferences. The
-   mock provider produces deterministic output and never makes an outbound
-   call.
-2. **Self-host open-weight models.** The same `AI_PROVIDER=openai` code path
-   works against a local vLLM / Ollama server serving Llama, Qwen, DeepSeek
-   weights. PHI stays on your network. Cost and quality trade-offs apply.
-3. **Sign a BAA** with OpenAI (Healthcare/Enterprise) or Anthropic and pin
-   `AI_BASE_URL` to that tier. Other providers (OpenRouter, generic vendors)
-   are unsuitable for PHI in BAA-bound deployments.
-4. **De-identify before sending — now on by default.** `DEIDENTIFY_LEVEL`
-   defaults to `safe_harbor`, which redacts the HIPAA Safe Harbor 18 at the
-   outbound boundary in `ai_provider` for every one of the five call types
-   (`extract`, `summary`, `coding`, `embed`, `rag`). The on-disk data model
-   stays unredacted; only the LLM payload is rewritten. Implementation lives
-   in `backend/app/services/deidentify.py` and tracks per-call catch counts
-   in `ai_outputs.redaction_counts`. See the "De-identification" subsection
-   below for the level switch and what it does/does not catch.
-5. **Restrict to consented research/quality-improvement workflows** with
-   IRB/Ethics Committee approval and an explicit data-use agreement.
-6. **Encrypt the Postgres + Neo4j volumes at rest** and gate access with the
-   `BACKEND_API_KEY` middleware. The vector embeddings are PHI-derived even
-   though they're floating-point numbers, and the `content` column stores
-   the verbatim text.
-7. **Log + monitor every outbound call.** The existing `ai_outputs` table
-   is already an audit trail; just don't drop it. Add alerting for
-   unexpected providers / costs.
-
-### De-identification
-
-A redactor runs at the outbound boundary in `ai_provider` before any payload
-leaves the host. It implements HIPAA Safe Harbor §164.514 across both
-structured fields and free clinical text, and ships with Thai-specific
-recognisers because the sample data is mixed Thai + English.
-
-| Setting | Behaviour | When to use |
-|---|---|---|
-| `DEIDENTIFY_LEVEL=off` | No-op; PHI flows through as-is. | Only with a signed BAA pinned to that provider (e.g. OpenAI Enterprise, Anthropic Enterprise). |
-| `DEIDENTIFY_LEVEL=regex_only` | Regex-only sweep. Catches HN/MRN/emails/phones/IPs/dates/Thai national IDs/etc. | Fast path for unit tests, low-throughput deployments, or environments where the +500 MB NER install isn't acceptable. |
-| `DEIDENTIFY_LEVEL=safe_harbor` (default) | Regex + Microsoft Presidio (English narrative) + PyThaiNLP (Thai narrative) + per-request pseudonym map for names / HN / provider names; dates rounded to year; DOB → year + age class (`<30 / 30-44 / 45-64 / 65+`). | Production-shape demos with synthetic data and any deployment without a BAA. |
-
-What gets caught by category (regex sweep, before NER): `EMAIL_ADDRESS`,
-`URL`, `IP_ADDRESS` (v4 + v6), `PHONE_NUMBER` (international + Thai),
-`TH_NATIONAL_ID` (Luhn-checked), `US_SSN` (defensive), `HN_PATIENT_ID` (our
-`HN-XXXX` format), `MEDICAL_RECORD_NUMBER`, `HEALTH_PLAN_BENEFICIARY`,
-`ACCOUNT_NUMBER`, `VEHICLE_ID`, `DEVICE_ID`, `BIOMETRIC`, `DATE_TIME`,
-`LOCATION` (Thai admin divisions, room numbers). What NER adds on top:
-`PERSON` and `LOCATION` from spaCy's `en_core_web_sm` (English) and
-`pythainlp.tag.NER` (Thai) for names that don't follow a fixed pattern.
-
-Audit columns on `ai_outputs`:
-- `deidentified BOOLEAN` — `true` when the redactor ran on this call.
-- `redaction_counts JSONB` — per-category counts (e.g. `{"PERSON": 2,
-  "PHONE_NUMBER": 1, "DATE_TIME": 5}`).
-- `raw_response` — what actually left the host, so an auditor can verify
-  the redacted payload is PHI-free.
-
-One log line per call: `redacted_categories=PERSON:2,EMAIL_ADDRESS:1
-ai_provider=openrouter call_type=extract`.
-
-Pseudonyms are deterministic per-request — the same name maps to the same
-`PATIENT-A1` token throughout one HTTP call, so the LLM can reason about the
-referent consistently. Across requests, the pseudonym map resets, so the
-provider never sees cross-request linkage. The v1 implementation does not
-keep a server-side re-identification map; rehydrating a redacted output back
-to the original is intentionally out of scope.
-
-For embedding ingestion (`/v1/embeddings`), **embedded text is redacted
-text**. That means pgvector at rest is also de-identified, and vector
-search returns redacted snippets. UI re-identification of those snippets
-for a clinician is out of scope for v1.
-
-**Image size cost:** Presidio + spaCy `en_core_web_sm` + PyThaiNLP add
-~500 MB to the backend Docker image. The first build is slower; subsequent
-builds reuse the Docker layer cache. If you swap PyThaiNLP for its medium
-model, plan another ~1 GB. The redactor warm-loads NER pipelines at module
-import, so first-request latency doesn't pay the model-load cost.
-
-**Version pinning:** Presidio publishes patch releases on roughly a yearly
-cadence. Pin `presidio-analyzer` / `presidio-anonymizer` in
-`backend/requirements.txt` and review the changelog when bumping — model
-updates can change recall and shift `redaction_counts` baselines.
-
-### Regulatory re-evaluation (after de-identification, v1B)
-
-With `DEIDENTIFY_LEVEL=safe_harbor` active, the posture changes by
-regulation:
-
-- **HIPAA (US):** Safe Harbor de-identification under §164.514(b) requires
-  removal of all 18 identifier categories *and* "no actual knowledge that
-  the information could be used alone or in combination with other
-  information to identify an individual." This implementation removes the
-  18 categories at the outbound boundary, so the *prompt that crosses the
-  wire* is structurally Safe Harbor-shaped. **What still requires care:**
-  (a) the on-disk Postgres / Neo4j / vault data remains fully identified;
-  (b) NER recall is not 100% — clinical narrative with unusual phrasing
-  can leak; (c) the LLM response may still mention an identifier that
-  survived (e.g. a misspelled name regex misses). Treat this as a strong
-  technical control, not a legal opinion that BAA-free providers become
-  HIPAA-compliant.
-- **GDPR (EU/UK):** Removing direct identifiers moves the data toward
-  "pseudonymised" under Art. 4(5) — still personal data, but lower-risk
-  processing under Art. 32. Cross-border transfers (EU → US) still need an
-  SCC + transfer impact assessment unless the provider is in an adequacy
-  jurisdiction. The redactor is one element of the Art. 25 "data protection
-  by design" obligation, not a substitute for the Art. 28 processor
-  contract.
-- **PDPA (Thailand):** Thai national ID and Thai-formatted phones are
-  redacted by the regex pass before any text leaves the host. Thai
-  personal names are handled by PyThaiNLP NER in `safe_harbor` mode (less
-  reliably than English; benchmark against your own narrative before
-  relying on it). The §28 cross-border transfer rule still requires an
-  adequacy determination or explicit consent — de-identification does not
-  bypass that, it just reduces the magnitude of breach exposure if the
-  determination is later challenged.
-
-In all three regimes the redactor is necessary, not sufficient. The
-`Mitigations` ladder above (BAA, encryption at rest, audit logging,
-consent-bound research scope) still applies.
-
-### Current posture of this repository
-
-- Default `AI_PROVIDER=mock`, no outbound calls. Safe out of the box.
-- Default `DEIDENTIFY_LEVEL=safe_harbor` — when you switch `AI_PROVIDER` to
-  anything that talks HTTPS, the redactor is on. To turn it off explicitly
-  (e.g. you have a signed BAA), set `DEIDENTIFY_LEVEL=off`.
-- Sample data is **synthetic** (HN-DEMO-1 Somchai Sample) and crafted for
-  prototyping; it intentionally mixes Thai and English to exercise that
-  code path. It is NOT real patient data.
-- The active `.env.option.*` presets (`deepseek`, `gemini`, `hybrid`) all
-  route through **OpenRouter**, which does not offer BAAs. With the
-  redactor on by default these presets are usable for synthetic-data
-  demos; do **not** point them at real patient data without a signed BAA
-  *and* a privacy review.
-- No BAA enforcement, no provider allow-listing in code. These remain
-  deliberate omissions — design those in before any deployment that
-  touches a real EMR.
-
-If you're considering using this codebase against a real patient
-population, get a privacy/security review first. This README is documentation,
-not legal advice.
