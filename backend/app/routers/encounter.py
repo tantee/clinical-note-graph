@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import text
 
 from app.db.postgres import db_session
@@ -32,10 +32,17 @@ def verify_encounter(patient_id: str, encounter_id: str) -> None:
 
 @router.post(
     "/patient/{patient_id}/encounter/{encounter_id}/summary",
-    response_model=SummaryResponse,
     dependencies=[Depends(verify_encounter)],
 )
-async def encounter_summary(patient_id: str, encounter_id: str, req: SummaryRequest):
+async def encounter_summary(
+    patient_id: str, encounter_id: str, req: SummaryRequest,
+    async_processing: bool = Query(False, alias="async"),
+):
+    if async_processing:
+        from app.services.jobs import schedule_encounter_summary
+        job_id = schedule_encounter_summary(patient_id, encounter_id, req)
+        return {"jobId": job_id, "status": "queued", "type": "encounter_summary",
+                "patientId": patient_id, "encounterId": encounter_id}
     return await make_encounter_summary(patient_id, encounter_id, req)
 
 
@@ -49,10 +56,17 @@ def encounter_summary_latest(patient_id: str, encounter_id: str) -> dict[str, An
 
 @router.post(
     "/patient/{patient_id}/encounter/{encounter_id}/coding/suggest",
-    response_model=CodingSuggestResponse,
     dependencies=[Depends(verify_encounter)],
 )
-async def encounter_coding(patient_id: str, encounter_id: str, req: CodingSuggestRequest):
+async def encounter_coding(
+    patient_id: str, encounter_id: str, req: CodingSuggestRequest,
+    async_processing: bool = Query(False, alias="async"),
+):
+    if async_processing:
+        from app.services.jobs import schedule_encounter_coding
+        job_id = schedule_encounter_coding(patient_id, encounter_id, req)
+        return {"jobId": job_id, "status": "queued", "type": "encounter_coding",
+                "patientId": patient_id, "encounterId": encounter_id}
     return await suggest_encounter_coding(patient_id, encounter_id, req)
 
 
