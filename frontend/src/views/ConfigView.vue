@@ -27,11 +27,17 @@
             </template>
           </SectionHeader>
           <v-divider />
-          <v-card-text>
+          <!-- The form fields used inconsistent margins (some mt-2, others
+               relying on persistent-hint to add a gap). When persistent-hint
+               wasn't set the next field landed flush against the previous
+               one, especially after the API key row. Use a flex column with
+               an explicit `ga-3` gap so every field has the same breathing
+               room regardless of whether it shows a hint. -->
+          <v-card-text class="d-flex flex-column ga-3">
             <v-select v-model="patch.AI_PROVIDER" :items="['mock','openai','custom']" label="Provider"
                       hint="Use 'openai' for any OpenAI-compatible endpoint (OpenRouter, Groq, vLLM, …)" persistent-hint />
             <v-text-field v-model="patch.AI_BASE_URL" label="API base URL"
-                          placeholder="https://openrouter.ai/api/v1" class="mt-2" />
+                          placeholder="https://openrouter.ai/api/v1" />
             <v-text-field
               v-model="patch.AI_API_KEY"
               label="API key"
@@ -46,12 +52,14 @@
             <v-text-field v-model="patch.AI_MODEL" label="Default chat model"
                           hint="Used for any chat task without a per-task override below" persistent-hint />
             <v-text-field v-model="patch.AI_MODEL_EXTRACT" label="Model — EMR extract"
-                          placeholder="(blank = use default)" persistent-placeholder class="mt-2" />
+                          placeholder="(blank = use default)" persistent-placeholder
+                          hint="Strongest model recommended here — handles severity, temporality, and inter-fact relationships"
+                          persistent-hint />
             <v-text-field v-model="patch.AI_MODEL_SUMMARY" label="Model — Summary"
                           placeholder="(blank = use default)" persistent-placeholder />
             <v-text-field v-model="patch.AI_MODEL_CODING" label="Model — Coding suggest"
                           placeholder="(blank = use default)" persistent-placeholder />
-            <v-divider class="my-3" />
+            <v-divider class="my-1" />
             <v-text-field v-model="patch.AI_EMBEDDING_MODEL" label="Embedding model" />
           </v-card-text>
         </v-card>
