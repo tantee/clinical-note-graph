@@ -161,6 +161,11 @@ class AIProvider(ABC):
         standards: list[str],
         job_id: str | None = None,
         patient_id: str | None = None,
+        # Appended to CODING_SUGGEST_SYSTEM when the service decides to
+        # retry after a punt. Lets the caller add context like "your
+        # previous response had no codingCandidates — please commit to
+        # at least one code per problem at low confidence."
+        system_addendum: str = "",
     ) -> tuple[dict[str, Any], AICallRecord]:
         ...
 
@@ -581,7 +586,12 @@ class MockProvider(AIProvider):
         standards: list[str],
         job_id: str | None = None,
         patient_id: str | None = None,
+        system_addendum: str = "",
     ) -> tuple[dict[str, Any], AICallRecord]:
+        # The mock's deterministic generator already always produces
+        # candidates, so the addendum is a no-op here — but the signature
+        # has to match the abstract base class.
+        _ = system_addendum
         t0 = time.perf_counter()
         out = _mock_suggest_coding(patient_facts, standards)
         latency_ms = int((time.perf_counter() - t0) * 1000)
@@ -841,10 +851,13 @@ class OpenAICompatibleProvider(AIProvider):
         standards: list[str],
         job_id: str | None = None,
         patient_id: str | None = None,
+        system_addendum: str = "",
     ) -> tuple[dict[str, Any], AICallRecord]:
         deid = deidentifier_for(self.settings)
         safe_facts = deid.pseudonymize_facts(patient_facts)
         system = CODING_SUGGEST_SYSTEM
+        if system_addendum:
+            system = f"{system}\n\n# Retry context\n\n{system_addendum}"
         user = (
             "Patient structured facts:\n"
             + json.dumps(safe_facts, default=str)
