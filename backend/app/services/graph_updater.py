@@ -564,12 +564,44 @@ def fetch_graph(
     return graph
 
 
+# Relationship types the read query will look up as AI-declared edges.
+# Listed explicitly so the MATCH uses Neo4j's relationship-type index
+# instead of scanning every patient-scoped edge and post-filtering on a
+# property — which was the previous approach and the reason /graph hung
+# on large patients (issue #21).
+_AI_RELATION_TYPES_FOR_READ: tuple[str, ...] = (
+    "TREATS", "ADDRESSES", "MONITORS", "DIAGNOSTIC_OF",
+    "CAUSES", "DUE_TO", "COMPLICATION_OF", "RELATED_TO",
+    "PANEL_MEMBER_OF", "PRECEDES", "FOLLOWS",
+    # Note: CO_OCCURS is *also* an AI-relation type, but the bulk of
+    # CO_OCCURS edges in our graph come from the cross-encounter pair
+    # derivation, not from AI declarations. Picking those up here would
+    # double-count; keep them in the separate cooccurs subquery.
+)
+
+
 def _graph_cypher(
     patient_id: str, scope: str, encounter_ids: list[str],
     *, include_documents: bool, review_status: str,
 ) -> tuple[str, dict[str, Any]]:
-    """Build a single Cypher query with parameters. Filters facts by
-    review_status via a Cypher WHERE clause on each OPTIONAL MATCH."""
+    """Build the Cypher query that fetches one patient's subgraph.
+
+    Each heavy lookup (TREATS / ADDRESSES / CO_OCCURS / AI-declared
+    relationships) is wrapped in a `CALL { WITH p ... RETURN ... }`
+    subquery so the outer query never sees the cartesian product of all
+    the joined rows — only the aggregated lists.
+
+    Previously every OPTIONAL MATCH lived at the top level, so the
+    intermediate row count multiplied through each clause. For a patient
+    with 90 conditions + 80 observations + 21 medications + 22 plans the
+    running row count reached ~3.3M before the CO_OCCURS self-join was
+    even considered (90 × 80 × 21 × 22 = 3 326 400). The CO_OCCURS join
+    then added ~4 000 pairs on top, and the AI-relationships MATCH
+    multiplied further, putting the intermediate at 10⁹+ rows — Neo4j
+    would just sit there churning. The subquery boundaries keep each
+    aggregation local: TREATS sees only medications + conditions,
+    CO_OCCURS sees only conditions, etc.
+    """
     fact_filter = ""
     if review_status == "hide_rejected":
         fact_filter = " WHERE coalesce(n.reviewStatus, 'ai_suggested') <> 'rejected'"
@@ -581,7 +613,8 @@ def _graph_cypher(
     if scope in ("encounter", "encounters"):
         enc_match += " WHERE e.encounterId IN $eids"
 
-    parts = [
+    # The base block: nodes only. No fact-fact joins here.
+    base_parts = [
         "MATCH (p:Patient {patientId: $pid})",
         enc_match,
         "OPTIONAL MATCH (e)-[:MENTIONS]->(c:Condition)" + fact_filter.replace("n.", "c."),
@@ -589,60 +622,82 @@ def _graph_cypher(
         "OPTIONAL MATCH (e)-[:PRESCRIBED]->(m:Medication)" + fact_filter.replace("n.", "m."),
         "OPTIONAL MATCH (e)-[:HAS_PLAN]->(pl:Plan)" + fact_filter.replace("n.", "pl."),
         "OPTIONAL MATCH (p)-[:HAS_ALLERGY]->(a:Allergy)" + fact_filter.replace("n.", "a."),
-        # Cross-fact edges the ingest pipeline already stores: surface them so
-        # the rendered graph isn't just a star around the patient.
-        "OPTIONAL MATCH (m)-[:TREATS]->(treats_c:Condition)",
-        "OPTIONAL MATCH (pl)-[:ADDRESSES]->(addr_c:Condition)",
-        # Conditions that share at least one encounter — used to draw a
-        # faint CO_OCCURS link between them. Pair filter `c1.value < c2.value`
-        # gives each unordered pair once. Real Neo4j stores conditions as
-        # longitudinal nodes (one per (patientId, value)) and the encounter
-        # linkage lives on the [:MENTIONS] relationship — that's why we
-        # can't just read `encounterId` off the Condition.
-        "OPTIONAL MATCH (cc1:Condition {patientId: $pid})"
-        "<-[:MENTIONS]-(:Encounter)-[:MENTIONS]->"
-        "(cc2:Condition {patientId: $pid})"
-        " WHERE cc1.value < cc2.value",
-        # AI-declared inter-fact relationships (TREATS, MONITORS,
-        # COMPLICATION_OF, …). The match is intentionally broad: any
-        # patient-scoped fact node (Condition, Medication, Observation,
-        # Procedure, Allergy, Plan) on either side, joined by any of the
-        # AI-relation labels we know about. The relationship is whichever
-        # label the type-specific writer used; we only return ones with
-        # `aiDeclared=true` to keep the heuristic-derived TREATS edges
-        # (which we already surface via `treats_pairs`) from doubling up.
-        "OPTIONAL MATCH (rel_src {patientId: $pid})-[ai_r]->(rel_tgt {patientId: $pid})"
-        " WHERE ai_r.aiDeclared = true",
     ]
     if include_documents:
-        parts.append("OPTIONAL MATCH (e)-[:HAS_DOCUMENT]->(d:Document)")
+        base_parts.append("OPTIONAL MATCH (e)-[:HAS_DOCUMENT]->(d:Document)")
 
-    parts.append(
-        "RETURN p, "
+    # Aggregate the nodes BEFORE running any relationship subqueries —
+    # `WITH p, collect(...)` collapses the row set back to a single row
+    # per patient, so the subqueries below run once, not once per fact.
+    with_clause = (
+        "WITH p, "
         "collect(DISTINCT e) AS encounters, "
         + ("collect(DISTINCT d) AS docs, " if include_documents else "")
         + "collect(DISTINCT c) AS conditions, "
         "collect(DISTINCT o) AS observations, "
         "collect(DISTINCT m) AS medications, "
         "collect(DISTINCT pl) AS plans, "
-        "collect(DISTINCT a) AS allergies, "
-        # Returned as pair lists so _materialize_rows can build edges
-        # between specific nodes rather than recomputing the relationship.
-        "collect(DISTINCT {medName: m.name, condValue: treats_c.value}) AS treats_pairs, "
-        "collect(DISTINCT {planDesc: pl.description, condValue: addr_c.value}) AS addresses_pairs, "
-        # Distinct (cond1, cond2, encounter) triples — _add_cooccurrence_edges
-        # counts encounters per pair so it can apply a min-encounters
-        # threshold and only emit clinically meaningful comorbidity links.
-        "collect(DISTINCT {a: cc1.value, b: cc2.value, eid: e.encounterId}) AS cooccurs_triples, "
-        # AI-declared relationships, returned with enough metadata for the
-        # materialiser to locate the source / target nodes by label + key.
-        "collect(DISTINCT {"
-        "  srcLabel: labels(rel_src)[0], srcKey: coalesce(rel_src.value, rel_src.name, rel_src.description),"
-        "  tgtLabel: labels(rel_tgt)[0], tgtKey: coalesce(rel_tgt.value, rel_tgt.name, rel_tgt.description),"
-        "  relType: type(ai_r), evidence: ai_r.evidence, confidence: ai_r.confidence"
-        "}) AS ai_relationships"
+        "collect(DISTINCT a) AS allergies"
     )
-    cypher = "\n        ".join(parts)
+
+    # Subqueries: each does its own MATCH + collect against patient-scoped
+    # nodes. They share `p` from the outer scope but produce only
+    # aggregated lists, so the outer row count stays at 1.
+    treats_subquery = """
+    CALL {
+        WITH p
+        OPTIONAL MATCH (m:Medication {patientId: p.patientId})-[:TREATS]->(c:Condition {patientId: p.patientId})
+        RETURN collect(DISTINCT {medName: m.name, condValue: c.value}) AS treats_pairs
+    }"""
+
+    addresses_subquery = """
+    CALL {
+        WITH p
+        OPTIONAL MATCH (pl:Plan {patientId: p.patientId})-[:ADDRESSES]->(c:Condition {patientId: p.patientId})
+        RETURN collect(DISTINCT {planDesc: pl.description, condValue: c.value}) AS addresses_pairs
+    }"""
+
+    cooccurs_subquery = """
+    CALL {
+        WITH p
+        OPTIONAL MATCH (cc1:Condition {patientId: p.patientId})<-[:MENTIONS]-(eShared:Encounter)-[:MENTIONS]->(cc2:Condition {patientId: p.patientId})
+        WHERE cc1.value < cc2.value
+        RETURN collect(DISTINCT {a: cc1.value, b: cc2.value, eid: eShared.encounterId}) AS cooccurs_triples
+    }"""
+
+    # AI-declared relationships — typed match so Neo4j uses the
+    # relationship-type index instead of scanning every patient-scoped
+    # edge. The label list lives in `_AI_RELATION_TYPES_FOR_READ` and is
+    # interpolated as Cypher relationship-type alternation (`a|b|c`).
+    rel_type_alt = "|".join(_AI_RELATION_TYPES_FOR_READ)
+    ai_rel_subquery = f"""
+    CALL {{
+        WITH p
+        OPTIONAL MATCH (rel_src {{patientId: p.patientId}})-[ai_r:{rel_type_alt}]->(rel_tgt {{patientId: p.patientId}})
+        WHERE ai_r.aiDeclared = true
+        RETURN collect(DISTINCT {{
+          srcLabel: labels(rel_src)[0], srcKey: coalesce(rel_src.value, rel_src.name, rel_src.description),
+          tgtLabel: labels(rel_tgt)[0], tgtKey: coalesce(rel_tgt.value, rel_tgt.name, rel_tgt.description),
+          relType: type(ai_r), evidence: ai_r.evidence, confidence: ai_r.confidence
+        }}) AS ai_relationships
+    }}"""
+
+    return_clause = (
+        "RETURN p, encounters, "
+        + ("docs, " if include_documents else "")
+        + "conditions, observations, medications, plans, allergies, "
+        "treats_pairs, addresses_pairs, cooccurs_triples, ai_relationships"
+    )
+
+    cypher = "\n".join([
+        "\n".join(base_parts),
+        with_clause,
+        treats_subquery,
+        addresses_subquery,
+        cooccurs_subquery,
+        ai_rel_subquery,
+        return_clause,
+    ])
     return cypher, {"pid": patient_id, "eids": encounter_ids}
 
 

@@ -212,9 +212,20 @@
           </v-col>
           <v-col cols="12" md="5" class="d-flex">
             <v-card class="d-flex flex-column flex-grow-1 overflow-hidden">
-              <SectionHeader title="Extracted facts" icon="mdi-format-list-bulleted-square" />
+              <SectionHeader title="Extracted facts" icon="mdi-format-list-bulleted-square">
+                <template #actions>
+                  <v-chip size="x-small" variant="tonal" v-if="selectedDocument?.facts?.length">
+                    {{ selectedDocument.facts.length }}
+                  </v-chip>
+                </template>
+              </SectionHeader>
               <v-divider />
-              <v-list density="comfortable" class="flex-grow-1 overflow-y-auto" style="min-height: 0;">
+              <!-- overflow-y: scroll keeps the scrollbar gutter reserved so
+                   the column doesn't look like it's missing content on macOS
+                   (where `overflow-y: auto` hides the scrollbar until the
+                   user hovers / drags). The fact count chip above tells the
+                   user up-front how many items they're scrolling through. -->
+              <v-list density="comfortable" class="flex-grow-1" style="min-height: 0; overflow-y: scroll;">
                 <v-list-item v-for="f in selectedDocument?.facts || []" :key="f.id" :title="f.value">
                   <template #prepend>
                     <v-icon :color="FACT_TYPE_META[f.type]?.color || 'grey'">{{ FACT_TYPE_META[f.type]?.icon || 'mdi-circle-medium' }}</v-icon>
