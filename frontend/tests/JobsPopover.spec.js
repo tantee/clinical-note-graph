@@ -20,7 +20,8 @@ const stubs = {
   'v-spacer': true,
   'v-icon': true,
   'v-chip': { template: '<span><slot/></span>' },
-  'v-badge': { template: '<span class="badge">{{ content }}</span>', props: ['content'] },
+  // v-btn now renders the active count inline as its label when hasActive
+  // is true. The test asserts that text via standard text() matching.
   'v-btn': {
     template: '<button :aria-label="ariaLabel" @click="$emit(\'click\')"><slot/></button>',
     props: ['ariaLabel'],
@@ -38,7 +39,7 @@ describe('JobsPopover', () => {
     setActivePinia(createPinia())
   })
 
-  it('shows the active count in the badge when jobs are running', async () => {
+  it('shows the active count in the trigger button when jobs are running', async () => {
     const { listJobs } = await import('../src/api/client.js')
     listJobs.mockReset()
     listJobs.mockImplementation((params) => {
@@ -54,7 +55,10 @@ describe('JobsPopover', () => {
     const Popover = (await import('../src/components/JobsPopover.vue')).default
     const w = mount(Popover, { global: { stubs, plugins: [createPinia()] } })
     await flushPromises()
-    expect(w.find('.badge').text()).toBe('2')
+    // Count "2" renders inline as the trigger button's label.
+    const activator = w.find('button[aria-label="Active jobs"]')
+    expect(activator.exists()).toBe(true)
+    expect(activator.text()).toContain('2')
     const html = w.html()
     expect(html).toContain('Patient coding')
     expect(html).toContain('EMR ingest')
@@ -69,8 +73,10 @@ describe('JobsPopover', () => {
     const w = mount(Popover, { global: { stubs, plugins: [createPinia()] } })
     await flushPromises()
     expect(w.html()).toContain('No active jobs')
-    // Badge shouldn't render when nothing is active.
-    expect(w.find('.badge').exists()).toBe(false)
+    // No numeric count on the activator when nothing is active — only the
+    // sr-only text remains.
+    const activator = w.find('button[aria-label="Active jobs"]')
+    expect(activator.text().trim()).toBe('No active jobs')
   })
 
   it('renders the failed section separately when there are recent failures', async () => {

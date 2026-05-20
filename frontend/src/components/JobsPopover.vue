@@ -1,25 +1,23 @@
 <template>
   <v-menu v-model="open" location="bottom end" :close-on-content-click="false" max-width="420">
+    <!-- Match the same `prepend-icon` + label pattern the other app-bar
+         buttons use (Patients / Ingest / Config / etc.). Earlier
+         iterations tried `v-btn :icon=` plus a wrapping `v-badge`, but
+         the icon-only mode + floating badge combination rendered with
+         zero visible width in this Vuetify build. The straightforward
+         text-button form just works, and the active count goes inline
+         as the button's label so the user sees "3" right next to the
+         clock when there's work in flight. -->
     <template #activator="{ props: a }">
       <v-btn
         v-bind="a"
         variant="text"
-        size="small"
-        :icon="hasActive ? 'mdi-progress-clock' : 'mdi-progress-clock-outline'"
+        :prepend-icon="hasActive ? 'mdi-progress-clock' : 'mdi-progress-clock-outline'"
         :color="hasActive ? 'warning' : ''"
         aria-label="Active jobs"
       >
-        <v-icon :color="hasActive ? 'warning' : ''">
-          {{ hasActive ? 'mdi-progress-clock' : 'mdi-progress-clock-outline' }}
-        </v-icon>
-        <v-badge
-          v-if="hasActive"
-          :content="String(active.length)"
-          color="warning"
-          floating
-          :offset-x="-4"
-          :offset-y="-4"
-        />
+        <span v-if="hasActive">{{ active.length }}</span>
+        <span v-else class="d-sr-only">No active jobs</span>
       </v-btn>
     </template>
 
