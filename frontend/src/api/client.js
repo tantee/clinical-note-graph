@@ -120,6 +120,21 @@ export const getLatestEncounterCoding = (pid, eid) =>
   api.get(`/api/patient/${encodeURIComponent(pid)}/encounter/${encodeURIComponent(eid)}/coding/latest`).then(data)
 export const ragAsk = (body) =>
   api.post('/api/rag/ask', body, { timeout: AI_GEN_TIMEOUT_MS }).then(data)
+
+// Queue-mode counterparts (PR for issue #25). Same endpoints with
+// `?async=true` — return the queued-job envelope
+// `{jobId, status: "queued", type, patientId[, encounterId]}`
+// immediately so the UI can render the confirmation dialog without
+// blocking on the 3-5 minute reasoning call. Scripted callers stick
+// with the inline helpers above.
+export const summarizeQueued = (id, body) =>
+  api.post(`/api/patient/${encodeURIComponent(id)}/summary?async=true`, body).then(data)
+export const suggestCodingQueued = (id, body) =>
+  api.post(`/api/patient/${encodeURIComponent(id)}/coding/suggest?async=true`, body).then(data)
+export const summarizeEncounterQueued = (pid, eid, body) =>
+  api.post(`/api/patient/${encodeURIComponent(pid)}/encounter/${encodeURIComponent(eid)}/summary?async=true`, body).then(data)
+export const suggestEncounterCodingQueued = (pid, eid, body) =>
+  api.post(`/api/patient/${encodeURIComponent(pid)}/encounter/${encodeURIComponent(eid)}/coding/suggest?async=true`, body).then(data)
 export const searchPatientsByVector = (q, limit = 10, signal) =>
   api.get('/api/search/patients', { params: { q, limit }, signal }).then(data)
 export const reviewFact = (factId, status) =>

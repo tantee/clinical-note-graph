@@ -109,6 +109,25 @@
         />
       </v-col>
     </v-row>
+
+    <!-- Post-submit confirmation dialog (issue #25).
+         Default CTA returns the user to Patients so they can queue another
+         note or watch the new job in the persistent popover. The secondary
+         CTA opens the just-ingested patient in case the user wants to watch
+         the per-stage progress inline. -->
+    <JobConfirmationDialog
+      v-model="confirmDialog"
+      :jobId="currentJobId || ''"
+      type="emr_ingest"
+      :patientId="lastSubmittedPatientId"
+      :encounterId="lastSubmittedEncounterId"
+      headline="Document queued for processing"
+      body="The EMR has been queued. You can submit another, head back to the patient list, or open the patient page to watch the ingest progress."
+      primaryLabel="Back to patients"
+      secondaryLabel="Open patient"
+      @primary="onConfirmBackToList"
+      @secondary="onConfirmOpenPatient"
+    />
   </div>
 </template>
 
@@ -120,6 +139,7 @@ import { ENCOUNTER_TYPES } from '../constants/clinical.js'
 import { useUiStore } from '../stores/ui.js'
 import SectionHeader from '../components/SectionHeader.vue'
 import JobWatcher from '../components/JobWatcher.vue'
+import JobConfirmationDialog from '../components/JobConfirmationDialog.vue'
 
 const ui = useUiStore()
 const route = useRoute()
@@ -141,6 +161,9 @@ const system = ref('UI')
 const content = ref('')
 const loading = ref(false)
 const currentJobId = ref(null)
+const confirmDialog = ref(false)
+const lastSubmittedPatientId = ref('')
+const lastSubmittedEncounterId = ref('')
 
 const patientResults = ref([])
 const patientsLoading = ref(false)
@@ -180,6 +203,13 @@ async function submit() {
     }
     const res = await ingest(body)
     currentJobId.value = res.jobId
+    lastSubmittedPatientId.value = patientId.value
+    lastSubmittedEncounterId.value = encounterId.value || ''
+    // Open the confirmation dialog so the user knows the work is queued and
+    // can decide whether to head back to the list (default — for the "queue
+    // a batch of notes" workflow) or open the patient page (to watch the
+    // per-stage JobWatcher progress).
+    confirmDialog.value = true
   } finally {
     loading.value = false
   }
@@ -187,10 +217,22 @@ async function submit() {
 
 function onDone(result) {
   ui.success('Document ingested')
+  // No auto-redirect any more — the user already chose their next step
+  // via the confirmation dialog. The completion just updates the inline
+  // JobWatcher panel and the persistent popover.
   const pid = result?.patientId || patientId.value
-  if (pid) router.push({ name: 'patient', params: { id: pid } })
+  if (!confirmDialog.value && pid) router.push({ name: 'patient', params: { id: pid } })
 }
 function onFailed(err) { ui.error(`Ingest failed: ${err}`) }
+
+function onConfirmBackToList() {
+  router.push({ name: 'patients' })
+}
+function onConfirmOpenPatient() {
+  if (lastSubmittedPatientId.value) {
+    router.push({ name: 'patient', params: { id: lastSubmittedPatientId.value } })
+  }
+}
 
 function fillAdmission() {
   content.value = `Admission note

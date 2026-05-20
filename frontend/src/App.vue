@@ -32,6 +32,10 @@
         prepend-icon="mdi-api"
         aria-label="OpenAPI docs"
       >API</v-btn>
+      <!-- Persistent jobs popover (issue #25): clock icon + badge with the
+           number of pending+running jobs. Lives left of the theme toggle so
+           it's a thumb-reach away on common laptop widths. -->
+      <JobsPopover />
       <v-btn
         :icon="ui.theme === 'dark' ? 'mdi-weather-sunny' : 'mdi-weather-night'"
         variant="text"
@@ -73,6 +77,7 @@
 <script setup>
 import { computed } from 'vue'
 import { useUiStore } from './stores/ui.js'
+import JobsPopover from './components/JobsPopover.vue'
 import PatientSearchInput from './components/PatientSearchInput.vue'
 
 const ui = useUiStore()

@@ -21,8 +21,16 @@ def list_jobs(
     where: list[str] = []
     params: dict[str, Any] = {"lim": limit, "off": offset}
     if status:
-        where.append("status = :st")
-        params["st"] = status
+        # Comma-separated list of statuses so the jobs popover can fetch
+        # `?status=pending,running` in one round-trip. Single-value form
+        # (`?status=pending`) still works — it parses to a one-element list.
+        statuses = [s.strip() for s in status.split(",") if s.strip()]
+        if len(statuses) == 1:
+            where.append("status = :st")
+            params["st"] = statuses[0]
+        else:
+            where.append("status = ANY(:sts)")
+            params["sts"] = statuses
     if type:
         where.append("type = :tp")
         params["tp"] = type

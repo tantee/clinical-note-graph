@@ -510,13 +510,17 @@ class FakeStore:
             rows = [a for a in self.ai_outputs if a["document_id"] == did]
             return FakeResult(rows[-1:] if rows else [])
         if " from jobs " in s:
-            # list_jobs path (limit/offset + optional status/type filters)
+            # list_jobs path (limit/offset + optional status/type filters,
+            # status accepts a single value via :st or a list via :sts).
             if "lim" in params or "off" in params:
                 rows = list(self.jobs.values())
                 st = params.get("st")
+                sts = params.get("sts")
                 tp = params.get("tp")
                 if st is not None:
                     rows = [r for r in rows if r.get("status") == st]
+                if sts is not None:
+                    rows = [r for r in rows if r.get("status") in sts]
                 if tp is not None:
                     rows = [r for r in rows if r.get("type") == tp]
                 rows.sort(key=lambda r: r.get("job_id", ""))
