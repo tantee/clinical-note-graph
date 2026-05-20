@@ -1,6 +1,8 @@
 # Operations
 
-Runtime behaviour: how ingest jobs are scheduled, how cost is tracked, and how the test suite is layered.
+> **Audience:** operators and contributors running the stack day-to-day.
+
+Runtime behaviour: how ingest jobs are scheduled, how cost is tracked, and how the test suite is layered. For deployment configuration (dev + prod), see [docs/deployment.md](deployment.md). For failure-mode recovery, see [docs/troubleshooting.md](troubleshooting.md).
 
 ## Async ingest
 

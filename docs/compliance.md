@@ -1,5 +1,7 @@
 # Compliance & data handling
 
+> **Audience:** operators, privacy/security reviewers, and anyone preparing this stack for clinical use. This is the **must-read** before pointing the stack at real data.
+
 > **TL;DR:** This is a **prototype**. The default `AI_PROVIDER=mock` sends nothing
 > off the host. Any other provider sends Protected Health Information (PHI) to
 > a third party — that's a regulated activity in most jurisdictions. **Do not
