@@ -12,6 +12,18 @@
       </span>
       <v-spacer />
       <span v-if="loading" class="text-caption text-grey-darken-1 mr-2">loading…</span>
+      <v-btn
+        v-if="scope === 'patient'"
+        icon="mdi-refresh"
+        variant="text"
+        size="small"
+        :loading="rebuilding"
+        aria-label="Rebuild graph from Postgres"
+        @click="confirmRebuild = true"
+      >
+        <v-icon>mdi-refresh</v-icon>
+        <v-tooltip activator="parent" location="bottom">Rebuild graph from Postgres</v-tooltip>
+      </v-btn>
       <v-btn icon="mdi-fit-to-page-outline" variant="text" size="small" @click="fit" aria-label="Fit view" />
       <v-btn icon="mdi-cog-outline" variant="text" size="small" @click="filtersOpen = true" aria-label="Filters" />
     </div>
@@ -33,12 +45,33 @@
             variant="tonal"
             color="primary"
             :loading="rebuilding"
-            prepend-icon="mdi-graph-outline"
-            @click="rebuild"
+            prepend-icon="mdi-refresh"
+            @click="confirmRebuild = true"
           >Rebuild graph from Postgres</v-btn>
         </div>
       </template>
     </EmptyState>
+
+    <!-- Rebuild confirmation — wipe-before-rebuild is destructive on Neo4j
+         even though the source-of-truth Postgres rows are untouched. -->
+    <v-dialog v-model="confirmRebuild" max-width="480">
+      <v-card>
+        <v-card-title class="text-subtitle-1">Rebuild graph from Postgres?</v-card-title>
+        <v-card-text class="text-body-2">
+          This wipes the patient's existing Neo4j subgraph (encounters,
+          documents, conditions, medications, observations, …) and replays
+          the upserts from the Postgres facts. Useful for clearing duplicate
+          nodes from prior rebuilds, or recovering from a silent ingest
+          failure. The Patient node is kept; Postgres rows are not touched.
+          No AI calls.
+        </v-card-text>
+        <v-card-actions>
+          <v-spacer />
+          <v-btn variant="text" @click="confirmRebuild = false">Cancel</v-btn>
+          <v-btn color="primary" :loading="rebuilding" @click="doRebuild">Rebuild</v-btn>
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
 
     <!-- Filter side drawer -->
     <v-navigation-drawer v-model="filtersOpen" location="right" temporary width="320">
@@ -117,6 +150,7 @@ const container = ref(null)
 const data = ref({ nodes: [], edges: [] })
 const loading = ref(false)
 const rebuilding = ref(false)
+const confirmRebuild = ref(false)
 const oversized = ref(null)
 const filtersOpen = ref(false)
 const pickerOpen = ref(false)
@@ -289,12 +323,13 @@ async function load() {
   }
 }
 
-async function rebuild() {
-  // Recovery path for the silent-graph-upsert-failure mode: replays
+async function doRebuild() {
+  // Recovery + dedupe path: wipes the patient subgraph, then replays
   // graph_updater against the rows already in Postgres. No AI calls.
   rebuilding.value = true
   try {
     const summary = await rebuildGraph(props.patientId)
+    confirmRebuild.value = false
     const withErrors = (summary.perDocument || []).filter((d) => d.error)
     if (withErrors.length) {
       ui.error(`Graph rebuild produced errors on ${withErrors.length} document(s) — check backend logs.`)
