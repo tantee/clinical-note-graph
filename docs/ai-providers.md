@@ -1,6 +1,8 @@
 # AI provider configuration
 
-Any OpenAI-compatible endpoint works. The backend speaks the standard `/chat/completions` and `/embeddings` shape, so `AI_PROVIDER=openai` is reused for all of them — only the `AI_BASE_URL` changes.
+> **Audience:** anyone choosing which model(s) and provider to point this stack at.
+
+Any OpenAI-compatible endpoint works. The backend speaks the standard `/chat/completions` and `/embeddings` shape, so **`AI_PROVIDER=openai` is the right setting for OpenAI, OpenRouter, Groq, vLLM, Ollama, DeepSeek, Azure OpenAI, and every other compatible host** — only the `AI_BASE_URL` changes per host. The `openai` label is historical; treat it as "use the OpenAI wire protocol", not "talk to OpenAI specifically".
 
 You can configure providers three ways:
 - Edit `.env` and restart `docker compose up`.

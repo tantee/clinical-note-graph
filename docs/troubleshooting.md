@@ -1,0 +1,94 @@
+# Troubleshooting & FAQ
+
+> **Audience:** anyone hitting the codebase for the first time and confused why something isn't behaving as documented.
+
+The systematic failure-mode tables live in the page where the failure happens:
+
+- [docs/deployment.md → Common dev pitfalls](deployment.md#common-dev-pitfalls)
+- [docs/deployment.md → Failure modes + recovery](deployment.md#failure-modes--recovery)
+
+This page collects the questions that don't fit either — usage gotchas, "is that supposed to do that?" moments, and behaviour that surprises newcomers.
+
+---
+
+## "Why is my AI provider key not being used?"
+
+Effective config is the merge of three sources, in increasing precedence:
+
+1. Defaults in `backend/app/config.py`.
+2. Env vars from your shell + `.env` (loaded by docker compose).
+3. Persisted overrides in the `app_config` Postgres table (written by `PATCH /api/config` or the UI).
+
+So if you set `AI_PROVIDER=openai` in `.env` but the UI also has a persisted override pointing at `mock`, the override wins. Check `GET /api/config` (secrets masked) to see what's actually in effect, and `DELETE` or re-`PATCH` to fix.
+
+## "Why did my ingest succeed but no facts appear?"
+
+Most likely: the AI returned malformed JSON, so strict Pydantic validation rejected it. By design, validation failure logs the raw output to `ai_outputs.error` and writes an `EXTRACTION_INVALID` audit event, but **skips all downstream writes** (no facts, no graph, no markdown, no embeddings). Check:
+
+```sql
+SELECT call_type, model, error, validation_errors
+  FROM ai_outputs
+ WHERE error IS NOT NULL OR valid = false
+ ORDER BY created_at DESC LIMIT 5;
+```
+
+If the error is `Expecting value: line 1 column 1`, the model didn't return JSON. Try a different model (Gemini 2.5 Flash and Claude 3.5 Sonnet are gold-standard for `response_format=json_object` adherence).
+
+## "I switched DEIDENTIFY_LEVEL but nothing changed"
+
+`DEIDENTIFY_LEVEL` lives in process env, not in `app_config`. To switch it you need to either:
+
+- Edit `.env` and `docker compose restart backend` (env vars need a process restart).
+- Set it directly on the running container with `docker compose exec backend env DEIDENTIFY_LEVEL=off …` — won't survive restart.
+
+The runtime-config overrides path (`PATCH /api/config`) only covers fields stored in Postgres. The de-identifier setting is a deliberate exception — toggling redaction at runtime via an API endpoint would itself be a security risk.
+
+## "Why does the redactor not catch [name]?"
+
+Two recall ceilings:
+
+1. **Regex-only mode** catches structured identifiers (HN, emails, phones, IDs, dates). It does **not** catch arbitrary person names — that needs NER.
+2. **Safe-harbor mode** adds Presidio (English) and PyThaiNLP (Thai). Recall is good but not 100% — unusual spellings, OCR artifacts, and code-switched text leak. Check `ai_outputs.redaction_counts` to confirm the redactor is seeing the names you expect.
+
+If a specific name pattern recurs in your data, add a custom recognizer in `backend/app/services/deidentify_recognizers.py` and write a test.
+
+## "RAG returns 'No relevant excerpts retrieved'"
+
+The vector index is empty for that patient. Two common causes:
+
+- The ingest happened before embedding was wired up (or the embedding model was unavailable that day). Re-trigger: `POST /api/jobs/{id}/requeue` on the relevant ingest job, or re-ingest the document.
+- The patient ID in the URL doesn't match the `patient_id` in the embeddings table. Check `SELECT DISTINCT patient_id FROM embeddings;` and compare.
+
+## "The frontend can't reach the backend"
+
+Three layers of failure:
+
+- **Wrong base URL.** In dev, axios uses relative URLs (`/api/...`), so requests go to whichever origin served the page. If you open the UI via the Vite dev server (`:5173`) instead of the Caddy proxy (`:80`), the relative URL hits Vite, which doesn't proxy `/api`. Open via the Caddy URL, or set `VITE_API_BASE=http://localhost:8000`.
+- **CORS.** Default `.env` has `CORS_ORIGINS=*` (dev only). If you set a real allow-list, the origin must match exactly — `http://localhost` ≠ `http://localhost:5173`.
+- **API key.** `/api/emr`, `/api/config`, `/api/export`, `/api/facts`, `/api/debug` require `X-API-Key: $BACKEND_API_KEY` when `BACKEND_API_KEY` is set. The axios client sets it automatically from `localStorage`; check the Config page or set it via DevTools.
+
+## "Image build is huge / slow"
+
+Presidio + spaCy + PyThaiNLP adds ~500 MB. First build is slow; subsequent builds reuse the Docker layer cache because `requirements.txt` is `COPY`d before the rest of the source.
+
+If you don't need the safe-harbor de-identifier (e.g. you're behind a BAA), set `DEIDENTIFY_LEVEL=off`. The libs are still in the image — to shrink the image too, remove the four de-identifier lines from `backend/requirements.txt` and the `python -m spacy download …` step from `backend/Dockerfile`, then rebuild.
+
+## "Tests pass locally but CI is red"
+
+CI uses Python 3.12; the in-tree venv defaults to whatever `python` resolves to. If you ran tests under 3.11 locally, an asyncio / typing nuance might have hidden. Pin your local venv: `python3.12 -m venv backend/.venv`.
+
+## "How do I see what actually left the host?"
+
+`ai_outputs.raw_response` is the verbatim JSON returned by the AI provider. To see the prompt that was sent, add a temporary log line in `app/services/ai_provider.py` — we deliberately don't persist prompts (storage doubles, and prompts are reconstructible from `patient_facts` + the redacted patient row). The de-identification audit row tells you which categories got caught (`ai_outputs.redaction_counts`) without you having to inspect the prompt.
+
+## "Where's the source of truth for [thing]?"
+
+| Thing | Source of truth |
+|---|---|
+| Schema migrations | `backend/db/init/*.sql` (numeric order). No formal tracker. |
+| API contract | `backend/app/routers/*.py` decorators. Auto-generated OpenAPI at `/docs`. |
+| AI output shape | `backend/app/schemas/extraction.py` (`ClinicalExtractionResult`). |
+| Effective config | `GET /api/config` (with secrets masked). |
+| Cost per model | `model_pricing` table; UI at `/#/config` → Model pricing card. |
+| What got redacted | `ai_outputs.redaction_counts` for the call in question. |
+| Whether a job ran | `jobs` table; UI at `/#/debug` → Jobs tab. |
