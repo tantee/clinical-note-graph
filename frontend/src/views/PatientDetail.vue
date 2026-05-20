@@ -327,10 +327,14 @@ async function load() {
   activeAbort = ctl
   loading.value = true
   try {
-    const [p, t, g, n, sum, cod, encs] = await Promise.all([
+    // GraphView fetches /graph itself when its tab mounts — pre-fetching
+    // here did nothing (the result was never passed to the component) and
+    // it took down the whole page when /graph hung on large patients.
+    // Removed: getGraph(props.id, { signal: ctl.signal }). graph.value is
+    // kept as a now-unused ref for any external callers.
+    const [p, t, n, sum, cod, encs] = await Promise.all([
       getPatient(props.id, ctl.signal),
       getTimeline(props.id, ctl.signal),
-      getGraph(props.id, { signal: ctl.signal }),
       getNotes(props.id, ctl.signal),
       getLatestSummary(props.id).catch(() => null),
       getLatestCoding(props.id).catch(() => null),
@@ -338,7 +342,6 @@ async function load() {
     ])
     patient.value = p
     timeline.value = t
-    graph.value = g
     notes.value = n.files
     summary.value = sum || null
     codingResp.value = cod?.payload || null
