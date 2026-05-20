@@ -20,11 +20,16 @@ const stubs = {
   'v-spacer': true,
   'v-icon': true,
   'v-chip': { template: '<span><slot/></span>' },
-  // v-btn now renders the active count inline as its label when hasActive
-  // is true. The test asserts that text via standard text() matching.
   'v-btn': {
     template: '<button :aria-label="ariaLabel" @click="$emit(\'click\')"><slot/></button>',
     props: ['ariaLabel'],
+  },
+  // v-badge wraps its child icon and renders `content` as a floating
+  // overlay. The trigger only mounts the badge when hasActive is true,
+  // so this stub mirrors that with a class hook for the assertions.
+  'v-badge': {
+    template: '<span class="badge" :data-content="content"><slot/></span>',
+    props: ['content', 'color', 'location'],
   },
   'v-list': { template: '<ul><slot/></ul>' },
   'v-list-item': {
@@ -55,10 +60,10 @@ describe('JobsPopover', () => {
     const Popover = (await import('../src/components/JobsPopover.vue')).default
     const w = mount(Popover, { global: { stubs, plugins: [createPinia()] } })
     await flushPromises()
-    // Count "2" renders inline as the trigger button's label.
-    const activator = w.find('button[aria-label="Active jobs"]')
-    expect(activator.exists()).toBe(true)
-    expect(activator.text()).toContain('2')
+    // Count "2" appears in the badge wrapping the activator icon.
+    const badge = w.find('button[aria-label="Active jobs"] .badge')
+    expect(badge.exists()).toBe(true)
+    expect(badge.attributes('data-content')).toBe('2')
     const html = w.html()
     expect(html).toContain('Patient coding')
     expect(html).toContain('EMR ingest')
@@ -73,10 +78,10 @@ describe('JobsPopover', () => {
     const w = mount(Popover, { global: { stubs, plugins: [createPinia()] } })
     await flushPromises()
     expect(w.html()).toContain('No active jobs')
-    // No numeric count on the activator when nothing is active — only the
-    // sr-only text remains.
-    const activator = w.find('button[aria-label="Active jobs"]')
-    expect(activator.text().trim()).toBe('No active jobs')
+    // No badge in the activator when there are no active jobs — the
+    // outline-only icon renders by itself.
+    const badge = w.find('button[aria-label="Active jobs"] .badge')
+    expect(badge.exists()).toBe(false)
   })
 
   it('renders the failed section separately when there are recent failures', async () => {
