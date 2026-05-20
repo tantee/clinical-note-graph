@@ -17,7 +17,10 @@ def _vault_summary_path(
     encounter_id: str | None, created_at: datetime,
 ) -> Path:
     """Encounter-scoped: patients/<HN>/encounters/<eid>/<kind>-<type>.md (overwritten).
-       Patient-level:    patients/<HN>/summaries/<ts>-<kind>[-<type>].md (timestamped)."""
+       Patient-level summary: patients/<HN>/summaries/<ts>-summary[-<type>].md
+       Patient-level coding:  patients/<HN>/coding/patient-level-<ts>.md
+                              (per #27 Part A — colocates with encounter-level
+                               coding/<ts>.md under the same `coding/` folder)."""
     settings = effective_settings()
     safe_pid = re.sub(r"[^A-Za-z0-9._-]+", "-", patient_id)
     suffix = f"-{summary_type}" if summary_type else ""
@@ -26,6 +29,9 @@ def _vault_summary_path(
         return (Path(settings.VAULT_PATH) / "patients" / safe_pid /
                 "encounters" / safe_eid / f"{kind}{suffix}.md")
     date_str = created_at.strftime("%Y-%m-%d-%H%M%S")
+    if kind == "coding":
+        return (Path(settings.VAULT_PATH) / "patients" / safe_pid /
+                "coding" / f"patient-level-{date_str}.md")
     return (Path(settings.VAULT_PATH) / "patients" / safe_pid /
             "summaries" / f"{date_str}-{kind}{suffix}.md")
 
@@ -129,22 +135,23 @@ def save_coding(
     *, patient_id: str, payload: dict[str, Any], model: str | None,
     cost_usd, latency_ms: int | None, encounter_id: str | None = None,
 ) -> dict[str, Any]:
-    # Coding gets a vault file too when encounter-scoped — clinicians want to
-    # see the suggested codes in Obsidian alongside the discharge summary.
+    # Coding gets a vault file in BOTH the encounter-scoped and the
+    # patient-level case — clinicians want every coding run reflected in
+    # Obsidian (issue #27 Part A: the patient's notes folder must be a
+    # complete audit trail). _vault_summary_path picks the right destination.
     vault_path = None
-    if encounter_id:
-        created = datetime.now(timezone.utc)
-        path = _vault_summary_path(patient_id, "coding", None, encounter_id, created)
-        try:
-            md = _render_coding_markdown(payload)
-            _write_summary_markdown(
-                path, patient_id=patient_id, kind="coding", summary_type=None,
-                model=model, cost_usd=cost_usd, latency_ms=latency_ms, body_md=md,
-            )
-            settings = effective_settings()
-            vault_path = str(path.relative_to(settings.VAULT_PATH))
-        except Exception:
-            vault_path = None
+    created = datetime.now(timezone.utc)
+    path = _vault_summary_path(patient_id, "coding", None, encounter_id, created)
+    try:
+        md = _render_coding_markdown(payload)
+        _write_summary_markdown(
+            path, patient_id=patient_id, kind="coding", summary_type=None,
+            model=model, cost_usd=cost_usd, latency_ms=latency_ms, body_md=md,
+        )
+        settings = effective_settings()
+        vault_path = str(path.relative_to(settings.VAULT_PATH))
+    except Exception:
+        vault_path = None
     with db_session() as s:
         row = s.execute(
             text(
