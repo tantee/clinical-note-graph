@@ -1,10 +1,16 @@
 # Deployment
 
-> **Audience:** operators standing this stack up on either a laptop (dev) or a VPS (prod).
+> **Audience:** operators standing this stack up. For *editing the code*, see [docs/development.md](development.md).
 
-Two configurations ship out of the box: the **dev compose** (live-reload, ports exposed for tooling) and the **prod overlay** (single Caddy front-door, TLS, no exposed DB ports). Both run from the same `docker-compose.yml`.
+Three deployment shapes ship out of the box. Pick the closest match:
 
-If you only want to demo the project on your laptop, jump straight to [Development](#development). For production, follow [Production](#production) end-to-end — the pre-flight checklist is not optional.
+| Shape | Where it runs | TLS | Exposed ports | Data | Use it for |
+|---|---|---|---|---|---|
+| [**Development**](#development) | Laptop, dev VM | none | API + DB + Vite all exposed for tooling | synthetic / mock | local iteration, demos |
+| [**Dev / staging**](#dev--staging) | Shared dev VM, team URL | optional (Let's Encrypt or self-signed) | only the proxy | synthetic | team integration testing, UAT, screenshots for stakeholders |
+| [**Production**](#production) | Public VPS / managed host | mandatory (Let's Encrypt) | only the proxy | **review compliance first** | real workflows — read [docs/compliance.md](compliance.md) before pointing at real data |
+
+All three run from the same `docker-compose.yml`. The prod and staging shapes layer `docker-compose.prod.yml` on top with progressively stricter env-var requirements.
 
 ---
 
@@ -91,6 +97,121 @@ The Presidio + spaCy + PyThaiNLP deps are heavy. If you only need to run unit te
 | Hot reload not picking up backend changes | Permission on bind-mounted `./backend` | Ensure the host directory is owned by your user. The container runs as UID 10001 but reload is driven by mtime, which the bind-mount surfaces. |
 | Vault changes not visible from host | Vault is in a named volume, not a bind | Add `./vault:/data/vault` to the backend service `volumes:` if you want bind-mount semantics. |
 | `DEIDENTIFY_LEVEL=off` not taking effect | Settings cached at module import | Restart the backend container. The persisted overrides path (`/api/config`) takes effect on next request without restart. |
+| `column "deidentified" of relation "ai_outputs" does not exist` | Schema migration `005_deidentified_flag.sql` not applied to an existing database | Postgres only runs `db/init/*.sql` on **first** boot. For existing volumes apply manually — see [Updates](#updates). |
+
+For more troubleshooting: [docs/troubleshooting.md](troubleshooting.md). For dev workflows (debugging, IDE setup, running services in isolation), see [docs/development.md](development.md).
+
+---
+
+## Dev / staging
+
+A shared environment between local dev and full production. Use it when:
+
+- the team needs a stable URL to demo against, share screenshots from, or run UAT through;
+- you need an integration target for a CI pipeline or an EMR client team;
+- you want to validate the prod compose overlay without committing to a public domain + Let's Encrypt yet.
+
+### What's different from production
+
+| | Production | Dev / staging |
+|---|---|---|
+| Hostname | Public domain | LAN hostname or `cng.staging.example.com` |
+| TLS | Let's Encrypt, mandatory | Optional. Plain HTTP, self-signed cert, or Let's Encrypt staging endpoint |
+| Real PHI | Allowed only with full compliance review | **Never.** Synthetic data only. |
+| Backups | Daily, off-host | Optional. Volumes survive container restarts; that's enough for most staging. |
+| `BACKEND_API_KEY` | Mandatory, rotated quarterly | Recommended (smoke-tests the auth middleware), but a fixed dev key is fine |
+| Restart policy | `restart: always` | `restart: unless-stopped` (inherited from `docker-compose.yml`) |
+| Database ports exposed | No | Optional — handy for the team to run ad-hoc queries against staging Postgres / Neo4j |
+
+### Boot
+
+The prod compose overlay requires `CNG_DOMAIN`, `CADDY_EMAIL`, `FRONTEND_ORIGIN`, and `BACKEND_API_KEY` regardless of the deployment shape (compose's `:?` directive). For a no-TLS staging on a LAN hostname:
+
+```env
+# .env for dev VM (e.g. staging.internal:80)
+CNG_DOMAIN=staging.internal              # any hostname Caddy can match
+CADDY_EMAIL=devnull@example.com          # never used because no LE cert is fetched
+VITE_API_BASE=http://staging.internal    # baked into the bundle
+FRONTEND_ORIGIN=http://staging.internal  # CORS allow-list
+BACKEND_API_KEY=dev-key-not-secret       # rotated separately from prod
+UVICORN_WORKERS=2
+
+# Use the deepseek/gemini/hybrid preset for the team's chosen LLM stack.
+AI_PROVIDER=openai
+AI_BASE_URL=https://openrouter.ai/api/v1
+AI_API_KEY=sk-or-v1-…
+AI_MODEL=google/gemini-2.5-flash
+
+DEIDENTIFY_LEVEL=safe_harbor             # leave on even in staging — synthetic Thai data exercises the recognisers
+```
+
+Boot the same way as prod:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+```
+
+Caddy sees `CNG_DOMAIN=staging.internal` (not a public DNS name and not `localhost`) and serves HTTPS via an internal self-signed cert. Clients will see a cert warning — acceptable for staging; if your team finds that distracting, either swap to plain HTTP (see below) or import Caddy's root cert from `caddydata` into your trust store.
+
+### Plain HTTP for staging (no cert warnings)
+
+If TLS in staging is more friction than it's worth, override the Caddyfile with the dev version:
+
+```yaml
+# docker-compose.staging.yml — additional overlay
+services:
+  proxy:
+    volumes:
+      - ./caddy/Caddyfile.dev:/etc/caddy/Caddyfile:ro
+    ports: !override
+      - "80:80"   # no 443 mapping; Caddy serves plain HTTP
+```
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.staging.yml up -d --build
+```
+
+This keeps the prod overlay's "DB ports closed, single-worker discipline" while serving plain HTTP. Suitable for an internal network only.
+
+### Let's Encrypt **staging** endpoint (for iterating on TLS)
+
+Public Let's Encrypt rate-limits at ~5 certs/week/domain — easy to hit while debugging. Switch Caddy to the staging endpoint while iterating:
+
+```caddy
+# caddy/Caddyfile.prod, inside the global block
+{
+    email {$CADDY_EMAIL:admin@example.com}
+    admin off
+    acme_ca https://acme-staging-v02.api.letsencrypt.org/directory
+}
+```
+
+Restart the proxy; new certs come from LE's staging tree (untrusted by browsers, but unlimited issuance). Remove the line and restart again when ready to fetch a real cert.
+
+### Hosting
+
+The minimal staging host is **2 vCPU / 4 GB RAM / 25 GB SSD** — half the prod recommendation. Backend + frontend + Postgres + Neo4j + Caddy all on one node. If you find Neo4j throttling under team-sized ingest loads, the first lever is `NEO4J_PAGECACHE` (raise from 256m to 1g) before splitting services.
+
+### Resetting staging
+
+Faster than waiting for backups to restore:
+
+```bash
+docker compose down -v        # delete every volume
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+```
+
+The schema rebuilds from `backend/db/init/*.sql` on the empty Postgres volume; Neo4j constraints are recreated on backend startup. Re-ingest your synthetic data via `./examples/ingest.sh` (point it at the staging hostname).
+
+### Promoting a build from staging → prod
+
+There's no separate image — both deployments build from the same `Dockerfile`. The promotion is operational, not artifact-level:
+
+1. Tag the commit you tested in staging (`git tag staging-2026-05-20 && git push --tags`).
+2. On the prod host, `git fetch && git checkout <tag>`.
+3. `docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build` with the prod `.env`.
+4. Apply any new SQL migrations manually — see [Updates](#updates).
+5. Smoke-test via `/health`, `/ready`, and a single ingest through `./examples/ingest.sh`.
 
 ---
 

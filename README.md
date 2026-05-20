@@ -20,8 +20,10 @@ Ordered by reader intent. Each page tags its audience at the top.
 
 | Page | Audience | When to read |
 |---|---|---|
-| [docs/deployment.md](docs/deployment.md) | Operator | Dev quick start, prod pre-flight checklist, TLS modes, resource sizing, backups, updates, observability, failure recovery, security hardening. |
+| [docs/deployment.md](docs/deployment.md) | Operator | Three deployment shapes (dev / staging / prod). Pre-flight checklists, TLS modes, sizing, backups, updates, observability, failure recovery, security hardening. |
+| [docs/development.md](docs/development.md) | Contributor | Repo orientation, three local dev modes, debugging (VS Code + PyCharm), pytest cheat-sheet, "how to add an endpoint / fact type / migration / AI call type". |
 | [docs/ai-providers.md](docs/ai-providers.md) | Operator / integrator | Configure OpenRouter / OpenAI / Groq / self-host; per-task model overrides; cost-effective preset stacks. |
+| [docs/features.md](docs/features.md) | Clinician / PM / newcomer | What every page and tab is for and how to use it — top-navigation map, Patient detail tabs, summary types, where coding suggestions live. |
 | [docs/compliance.md](docs/compliance.md) | Privacy / security reviewer | **Read before pointing at real data.** PHI dataflow audit, HIPAA / GDPR / PDPA framing, de-identification, regulatory posture. |
 | [docs/api.md](docs/api.md) | Integrator | HTTP API surface, Neo4j graph model, markdown vault layout. |
 | [docs/operations.md](docs/operations.md) | Operator / contributor | Async ingest queue, cost tracking, the test pyramid (unit → integration → e2e). |
