@@ -153,6 +153,97 @@ def get_graph(
     return graph
 
 
+@router.post("/patient/{patient_id}/graph/rebuild")
+def rebuild_graph(patient_id: str) -> dict[str, Any]:
+    """Reconstruct this patient's Neo4j subgraph from Postgres facts.
+
+    Recovery for the silent-graph-upsert-failure mode: when Neo4j was
+    unhealthy or transiently unreachable during ingest, the facts still
+    landed in Postgres but the graph stayed empty. This endpoint replays
+    `graph_updater` against the rows that are already there, with no
+    additional AI calls.
+
+    Idempotent — re-running on a populated graph is a no-op (`MERGE` on
+    every node and relationship).
+
+    Returns per-document counts so the caller (or the UI button that
+    triggers this) can confirm something was actually written.
+    """
+    from app.services.graph_updater import backfill_graph_for_document
+
+    with db_session() as s:
+        patient_row = s.execute(
+            text("SELECT * FROM patients WHERE patient_id = :pid"),
+            {"pid": patient_id},
+        ).mappings().first()
+        if not patient_row:
+            raise HTTPException(status_code=404, detail=f"Patient {patient_id} not found")
+        encounters = s.execute(
+            text("SELECT * FROM encounters WHERE patient_id = :pid"),
+            {"pid": patient_id},
+        ).mappings().all()
+        documents = s.execute(
+            text("SELECT * FROM documents WHERE patient_id = :pid"),
+            {"pid": patient_id},
+        ).mappings().all()
+        all_facts = s.execute(
+            text(
+                "SELECT * FROM facts WHERE patient_id = :pid "
+                "AND review_status <> 'rejected' "
+                "ORDER BY created_at ASC"
+            ),
+            {"pid": patient_id},
+        ).mappings().all()
+
+    if not documents:
+        # No documents = nothing the AI ever extracted. Encounters alone
+        # don't produce a useful graph; tell the caller to ingest first.
+        return {"documents": 0, "perDocument": []}
+
+    encounters_by_id = {e["encounter_id"]: dict(e) for e in encounters}
+    facts_by_doc: dict[str, list[dict[str, Any]]] = {}
+    for f in all_facts:
+        d = dict(f)
+        d["id"] = str(d["id"])
+        if d.get("confidence") is not None:
+            d["confidence"] = float(d["confidence"])
+        facts_by_doc.setdefault(d["document_id"] or "", []).append(d)
+
+    p_dict = {
+        "patientId": patient_id,
+        "name": patient_row.get("name"),
+        "gender": patient_row.get("gender"),
+        "birthDate": patient_row.get("birth_date"),
+    }
+    per_doc = []
+    for d in documents:
+        enc = encounters_by_id.get(d.get("encounter_id"))
+        if not enc:
+            continue
+        enc_dict = {
+            "encounterId": enc["encounter_id"],
+            "type": enc.get("type"),
+            "dateTime": enc.get("date_time"),
+            "department": enc.get("department"),
+            "provider": enc.get("provider"),
+        }
+        doc_dict = {
+            "documentId": d["document_id"],
+            "sourceSystem": d.get("source_system"),
+            "version": d.get("version") or "1",
+            "format": d.get("format"),
+        }
+        rows = facts_by_doc.get(d["document_id"], [])
+        try:
+            counts = backfill_graph_for_document(p_dict, enc_dict, doc_dict, rows)
+        except Exception as exc:
+            per_doc.append({"documentId": d["document_id"], "error": str(exc)})
+            continue
+        per_doc.append({"documentId": d["document_id"], "counts": counts})
+
+    return {"documents": len(documents), "perDocument": per_doc}
+
+
 @router.get("/patient/{patient_id}/notes")
 def get_notes(patient_id: str) -> dict[str, Any]:
     return {"files": list_patient_files(patient_id)}
@@ -189,13 +280,32 @@ def get_document(patient_id: str, document_id: str, include_raw: bool = Query(Tr
             text("SELECT * FROM ai_outputs WHERE document_id = :did ORDER BY created_at DESC LIMIT 1"),
             {"did": document_id},
         ).mappings().first()
+    # Normalise the rows the way gather_patient_facts does, then collapse same-
+    # condition / same-med mentions inside this document so the EMR-vs-facts
+    # tab matches the Overview tab's deduped lists. The doc may mention the
+    # same finding in IMP / Intraop / Discharge sections; the LLM faithfully
+    # produces one fact per mention. Reviewers want one row with evidence
+    # accumulated, not three separate rows.
+    from app.services.patient_facts import _dedupe_patient_facts, _PATIENT_DEDUPE_TYPES
+
+    normalised = [
+        {**dict(f), "id": str(f["id"]),
+         "confidence": float(f["confidence"]) if f["confidence"] is not None else None}
+        for f in facts
+    ]
+    by_type: dict[str, list[dict[str, Any]]] = {}
+    for f in normalised:
+        by_type.setdefault(f["type"], []).append(f)
+    for t in list(by_type):
+        if t in _PATIENT_DEDUPE_TYPES:
+            by_type[t] = _dedupe_patient_facts(by_type[t])
+    deduped = [f for rows in by_type.values() for f in rows]
+    # Preserve the (type, created_at) ordering the SQL produced.
+    deduped.sort(key=lambda f: (f.get("type") or "", str(f.get("created_at") or "")))
+
     return {
         "document": dict(doc),
-        "facts": [
-            {**dict(f), "id": str(f["id"]),
-             "confidence": float(f["confidence"]) if f["confidence"] is not None else None}
-            for f in facts
-        ],
+        "facts": deduped,
         "aiOutput": dict(ai) if ai else None,
     }
 

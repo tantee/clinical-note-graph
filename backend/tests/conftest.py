@@ -392,6 +392,10 @@ class FakeStore:
                 ]
             else:
                 rows = [f for f in self.facts if f.get("patient_id") == pid and (did is None or f.get("document_id") == did)]
+                # Honour the optional review_status <> 'rejected' filter that
+                # rebuild_graph and a few other patient-scope queries use.
+                if "review_status <> 'rejected'" in s:
+                    rows = [f for f in rows if f.get("review_status") != "rejected"]
             return FakeResult(rows)
         if " from documents " in s or "from documents\n" in s:
             pid = params.get("pid")

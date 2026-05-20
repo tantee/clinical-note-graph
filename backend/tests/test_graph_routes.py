@@ -108,3 +108,73 @@ def test_review_status_confirmed_only_includes_confirmed_in_cypher(app_client, s
     # Inspect the last Cypher query: must include reviewStatus filter.
     last_query = stub_neo4j[-1][0]
     assert "human_confirmed" in last_query
+
+
+# ---------------------------------------------------------------------------
+# Graph rebuild endpoint — the recovery path for the silent-upsert-fail mode.
+# ---------------------------------------------------------------------------
+
+
+def test_rebuild_graph_404_when_patient_unknown(app_client, fake_store):
+    r = app_client.post("/api/patient/HN-MISSING/graph/rebuild")
+    assert r.status_code == 404
+
+
+def test_rebuild_graph_returns_zero_when_no_documents(app_client, fake_store):
+    fake_store.patients["HN-1"] = {"patient_id": "HN-1", "name": "Test"}
+    r = app_client.post("/api/patient/HN-1/graph/rebuild")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["documents"] == 0
+    assert body["perDocument"] == []
+
+
+def test_rebuild_graph_replays_facts_per_document(app_client, fake_store, stub_neo4j):
+    """Seed one patient with one encounter, one document, three conditions.
+    Calling rebuild should hit the Cypher writes — verified by inspecting
+    the calls captured by stub_neo4j."""
+    fake_store.patients["HN-1"] = {"patient_id": "HN-1", "name": "Test"}
+    fake_store.encounters["E1"] = {
+        "encounter_id": "E1", "patient_id": "HN-1", "type": "admission",
+        "date_time": "2026-04-01T08:00:00+00:00",
+        "department": "IM", "provider": "Dr A",
+    }
+    fake_store.documents["D1"] = {
+        "document_id": "D1", "patient_id": "HN-1", "encounter_id": "E1",
+        "format": "text", "version": "1",
+    }
+    fake_store.facts.extend([
+        {"id": "f-1", "patient_id": "HN-1", "encounter_id": "E1",
+         "document_id": "D1", "type": "condition",
+         "value": "Hypertension", "normalized_code": "I10",
+         "review_status": "ai_suggested", "extra": {}, "confidence": 0.9,
+         "created_at": "2026-04-01T08:00:00Z"},
+        {"id": "f-2", "patient_id": "HN-1", "encounter_id": "E1",
+         "document_id": "D1", "type": "medication",
+         "value": "Lisinopril", "normalized_code": None,
+         "review_status": "ai_suggested",
+         "extra": {"action": "start", "indication": "Hypertension"},
+         "confidence": 0.85, "created_at": "2026-04-01T08:01:00Z"},
+        # A rejected fact must be excluded from the rebuild.
+        {"id": "f-3", "patient_id": "HN-1", "encounter_id": "E1",
+         "document_id": "D1", "type": "condition",
+         "value": "Anxiety", "normalized_code": "F41.9",
+         "review_status": "rejected", "extra": {}, "confidence": 0.6,
+         "created_at": "2026-04-01T08:02:00Z"},
+    ])
+
+    r = app_client.post("/api/patient/HN-1/graph/rebuild")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["documents"] == 1
+    assert len(body["perDocument"]) == 1
+    counts = body["perDocument"][0]["counts"]
+    # Rejected condition excluded, so 1 not 2.
+    assert counts["conditions"] == 1
+    assert counts["medications"] == 1
+
+    # Confirm Cypher writes actually fired — root + conditions + medications.
+    queries = [q for q, _ in stub_neo4j]
+    assert any("MERGE (p:Patient" in q for q in queries)
+    assert any("MERGE (c:Condition" in q for q in queries)
+    assert any("MERGE (med:Medication" in q for q in queries)

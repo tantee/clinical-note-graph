@@ -299,18 +299,36 @@ async def run_ingest_pipeline(
     graph_counts: dict[str, Any] = {}
     md_written: dict[str, str] = {}
     if valid:
-        try:
-            graph_task = asyncio.to_thread(update_graph_for_document, patient, encounter, document, extraction)
-            md_task = asyncio.to_thread(
-                generate_markdown,
-                patient=patient, encounter=encounter, document=document,
-                raw_content=text_for_ai, extraction=extraction,
-            )
-            graph_counts, md_written = await asyncio.gather(graph_task, md_task)
-            on_progress("stage_graph_and_markdown", counts=graph_counts, files=len(md_written))
-        except Exception as exc:
-            logger.exception("Post-extraction side-effect failed: %s", exc)
-            graph_counts = {"error": str(exc)}
+        # Split graph + markdown so one failure doesn't blank the other.
+        # Both errors flow into job.progress so JobWatcher surfaces them
+        # rather than only the backend log; the user knows whether the
+        # graph upsert silently failed and can hit the "Rebuild graph"
+        # button on the Graph tab to recover without re-paying for the
+        # AI extract.
+        graph_task = asyncio.to_thread(update_graph_for_document, patient, encounter, document, extraction)
+        md_task = asyncio.to_thread(
+            generate_markdown,
+            patient=patient, encounter=encounter, document=document,
+            raw_content=text_for_ai, extraction=extraction,
+        )
+        graph_result, md_result = await asyncio.gather(
+            graph_task, md_task, return_exceptions=True
+        )
+        if isinstance(graph_result, Exception):
+            logger.exception("Neo4j graph upsert failed: %s", graph_result)
+            graph_counts = {"error": str(graph_result)}
+            on_progress("stage_graph", error=str(graph_result),
+                        recovery="POST /api/patient/{id}/graph/rebuild")
+        else:
+            graph_counts = graph_result
+            on_progress("stage_graph", counts=graph_counts)
+        if isinstance(md_result, Exception):
+            logger.exception("Markdown generation failed: %s", md_result)
+            md_written = {}
+            on_progress("stage_markdown", error=str(md_result))
+        else:
+            md_written = md_result
+            on_progress("stage_markdown", files=len(md_written))
 
         # Embeddings — best-effort, bounded concurrency, batched insert
         try:

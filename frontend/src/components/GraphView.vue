@@ -25,7 +25,20 @@
     <div ref="container" :style="{ height: height + 'px' }" class="graph-canvas" />
 
     <EmptyState v-if="!loading && !data?.nodes?.length && !oversized"
-                icon="mdi-graph-outline" :title="emptyTitle" />
+                icon="mdi-graph-outline" :title="emptyTitle">
+      <template v-if="props.scope === 'patient' && scopeChip === 'all'" #default>
+        <div class="d-flex justify-center mt-3">
+          <v-btn
+            size="small"
+            variant="tonal"
+            color="primary"
+            :loading="rebuilding"
+            prepend-icon="mdi-graph-outline"
+            @click="rebuild"
+          >Rebuild graph from Postgres</v-btn>
+        </div>
+      </template>
+    </EmptyState>
 
     <!-- Filter side drawer -->
     <v-navigation-drawer v-model="filtersOpen" location="right" temporary width="320">
@@ -88,7 +101,7 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { Network, DataSet } from 'vis-network/standalone/esm/vis-network'
-import { getGraph, listEncounters } from '../api/client.js'
+import { getGraph, listEncounters, rebuildGraph } from '../api/client.js'
 import { useUiStore } from '../stores/ui.js'
 import EmptyState from './EmptyState.vue'
 
@@ -103,6 +116,7 @@ const ui = useUiStore()
 const container = ref(null)
 const data = ref({ nodes: [], edges: [] })
 const loading = ref(false)
+const rebuilding = ref(false)
 const oversized = ref(null)
 const filtersOpen = ref(false)
 const pickerOpen = ref(false)
@@ -265,6 +279,26 @@ async function load() {
     render()
   } finally {
     loading.value = false
+  }
+}
+
+async function rebuild() {
+  // Recovery path for the silent-graph-upsert-failure mode: replays
+  // graph_updater against the rows already in Postgres. No AI calls.
+  rebuilding.value = true
+  try {
+    const summary = await rebuildGraph(props.patientId)
+    const withErrors = (summary.perDocument || []).filter((d) => d.error)
+    if (withErrors.length) {
+      ui.error(`Graph rebuild produced errors on ${withErrors.length} document(s) — check backend logs.`)
+    } else {
+      ui.success(`Graph rebuilt from ${summary.documents} document(s).`)
+    }
+    await load()
+  } catch (err) {
+    // Surfaced by axios interceptor's snackbar; nothing more to do here.
+  } finally {
+    rebuilding.value = false
   }
 }
 

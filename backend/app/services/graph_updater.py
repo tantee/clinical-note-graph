@@ -253,6 +253,114 @@ FOREACH (_ IN CASE WHEN c IS NULL THEN [] ELSE [1] END |
 """
 
 
+def backfill_graph_for_document(
+    patient: dict[str, Any],
+    encounter: dict[str, Any],
+    document: dict[str, Any],
+    facts: list[dict[str, Any]],
+) -> dict[str, int]:
+    """Push raw Postgres fact rows for one document into Neo4j.
+
+    This is the recovery path for the silent-graph-upsert-failure mode: if
+    Neo4j was unhealthy during ingest, the patient ends up with facts in
+    Postgres but an empty graph. The original `update_graph_for_document`
+    needs a fully-formed `ClinicalExtractionResult`, which we don't have
+    after the AI call has been audited and discarded. This function operates
+    on the same raw rows that `gather_patient_facts` returns and reuses the
+    same Cypher constants, so the resulting graph is structurally identical
+    to what a fresh ingest would have produced.
+
+    `patient`, `encounter`, and `document` should be dicts with the same
+    keys the original function expects (`patientId`, `encounterId`,
+    `documentId`, …); the caller is responsible for mapping from Postgres
+    snake_case row keys.
+    """
+    ensure_constraints()
+
+    def _by(type_: str) -> list[dict[str, Any]]:
+        return [f for f in facts if f.get("type") == type_]
+
+    def _extra(f: dict[str, Any], k: str) -> Any:
+        return (f.get("extra") or {}).get(k)
+
+    conditions = [
+        {
+            "value": f["value"], "code": f.get("normalized_code"),
+            "system": f.get("coding_system"),
+            "reviewStatus": f.get("review_status") or "ai_suggested",
+            "confidence": f.get("confidence"), "evidence": f.get("evidence_text"),
+        }
+        for f in _by("condition")
+    ]
+    medications = [
+        {
+            "name": f["value"], "rxNorm": _extra(f, "rxNorm"),
+            "action": _extra(f, "action") or "continue",
+            "dose": _extra(f, "dose"), "route": _extra(f, "route"),
+            "frequency": _extra(f, "frequency"),
+            "indication": _extra(f, "indication"),
+            "evidence": f.get("evidence_text"),
+        }
+        for f in _by("medication")
+    ]
+    observations = [
+        {
+            "name": f["value"], "loinc": f.get("normalized_code"),
+            "value": _extra(f, "value") or "",
+            "unit": _extra(f, "unit"),
+            "abnormalFlag": _extra(f, "abnormalFlag"),
+            "dt": iso(f.get("date_time")),
+        }
+        for f in _by("observation")
+    ]
+    procedures = [
+        {"value": f["value"], "code": f.get("normalized_code"), "system": f.get("coding_system")}
+        for f in _by("procedure")
+    ]
+    allergies = [{"value": f["value"]} for f in _by("allergy")]
+    plans = [
+        {"description": f["value"], "category": _extra(f, "category") or "other",
+         "addresses": _extra(f, "addressesCondition")}
+        for f in _by("plan")
+    ]
+    coding_candidates = [
+        {"system": f.get("coding_system") or _extra(f, "system"),
+         "code": f.get("normalized_code") or _extra(f, "code"),
+         "display": _extra(f, "display") or f["value"],
+         "forCondition": _extra(f, "forCondition") or f["value"],
+         "confidence": f.get("confidence")}
+        for f in _by("coding_candidate")
+        if f.get("value") and (f.get("normalized_code") or _extra(f, "code"))
+    ]
+
+    params = _root_params(patient, encounter, document)
+    counts = {
+        "conditions": len(conditions), "medications": len(medications),
+        "observations": len(observations), "procedures": len(procedures),
+        "allergies": len(allergies), "plans": len(plans),
+        "codingCandidates": len(coding_candidates),
+    }
+
+    with neo4j_session() as s:
+        s.run(_CYPHER_ROOT, params)
+        if conditions:
+            s.run(_CYPHER_CONDITIONS, {**params, "rows": conditions})
+        if medications:
+            s.run(_CYPHER_MEDICATIONS, {**params, "rows": medications})
+        if observations:
+            s.run(_CYPHER_OBSERVATIONS, {**params, "rows": observations})
+        if procedures:
+            s.run(_CYPHER_PROCEDURES, {**params, "rows": procedures})
+        if allergies:
+            s.run(_CYPHER_ALLERGIES, {**params, "rows": allergies})
+        if plans:
+            s.run(_CYPHER_PLANS, {**params, "rows": plans})
+        if coding_candidates:
+            s.run(_CYPHER_CODING, {**params, "rows": coding_candidates})
+
+    return counts
+
+
 def _jsonable(value: Any) -> Any:
     """Recursively convert neo4j temporal types (and their containers) to JSON-friendly values."""
     if value is None or isinstance(value, (str, int, float, bool)):

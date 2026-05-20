@@ -46,6 +46,8 @@ export const getGraph = (id, options = {}) => {
   )
   return api.get(`/api/patient/${encodeURIComponent(id)}/graph`, { params, signal }).then(data)
 }
+export const rebuildGraph = (id) =>
+  api.post(`/api/patient/${encodeURIComponent(id)}/graph/rebuild`).then(data)
 export const getNotes = (id, signal) =>
   api.get(`/api/patient/${encodeURIComponent(id)}/notes`, { signal }).then(data)
 export const getNote = (id, path, signal) =>
