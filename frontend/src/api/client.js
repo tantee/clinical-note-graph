@@ -6,7 +6,17 @@ import { useUiStore } from '../stores/ui.js'
 // resolves the API host. Avoids cross-origin / CORS preflight on dev :8081.
 const baseURL = import.meta.env.VITE_API_BASE || ''
 
-export const api = axios.create({ baseURL, timeout: 120000 })
+// axios v1 defaults to bracket-style array serialization (`key[]=a&key[]=b`)
+// which FastAPI's `list[str] = Query(default=[])` doesn't recognise — it
+// wants repeat keys (`key=a&key=b`). Without this, GET /api/patient/{id}/graph
+// with scope=encounter silently returns 400 because the encounterId list
+// arrives empty on the backend. `indexes: null` flips the global serializer
+// to the repeat-key shape.
+export const api = axios.create({
+  baseURL,
+  timeout: 120000,
+  paramsSerializer: { indexes: null },
+})
 
 api.interceptors.request.use((config) => {
   const key = localStorage.getItem('cng_api_key')
@@ -14,9 +24,26 @@ api.interceptors.request.use((config) => {
   return config
 })
 
+// Recognise an AbortController-cancelled request. axios raises this shape
+// whenever a component aborts its in-flight requests on unmount / route
+// change — which is normal app behaviour, not an error worth surfacing to
+// the user. Without this guard a "canceled" snackbar pops every time you
+// flip tabs mid-load.
+const isCanceledError = (err) =>
+  err?.code === 'ERR_CANCELED'
+  || err?.name === 'CanceledError'
+  || err?.name === 'AbortError'
+  || axios.isCancel?.(err)
+  || err?.message === 'canceled'
+
 api.interceptors.response.use(
   (r) => r,
   (err) => {
+    if (isCanceledError(err)) {
+      // Re-reject so callers' try/catch / .catch chains still see the
+      // cancellation if they care, but skip the global snackbar.
+      return Promise.reject(err)
+    }
     if (err.config?.silent !== true) {
       const msg = err.response?.data?.detail || err.message || 'Request failed'
       try {

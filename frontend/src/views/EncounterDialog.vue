@@ -30,7 +30,7 @@
                          @click="loadSummary('brief')" />
           </v-list>
         </v-menu>
-        <v-btn color="primary" variant="tonal" prepend-icon="mdi-medical-bag-outline"
+        <v-btn color="primary" variant="tonal" prepend-icon="mdi-tag-text-outline"
                :loading="busy.coding" @click="loadCoding">
           {{ codingResp ? 'Regenerate coding' : 'Coding' }}
         </v-btn>
