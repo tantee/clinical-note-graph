@@ -277,6 +277,24 @@
       :eid="String(route.params.eid)"
       @close="closeEncounter"
     />
+
+    <!-- Confirmation dialog when the user kicks off a queued Summary or
+         Coding from this page (issue #25). Primary CTA "Stay" keeps them
+         on the patient page so they can watch the result land; secondary
+         "Back to patients" returns to the list. -->
+    <JobConfirmationDialog
+      v-if="activeJob"
+      v-model="confirmDialog"
+      :jobId="activeJob.jobId"
+      :type="activeJob.type"
+      :patientId="id"
+      :headline="activeJob.kind === 'coding' ? 'Coding queued' : 'Summary queued'"
+      body="The AI is generating this in the background. The card on this page will update automatically when it's ready — you can switch tabs or come back later."
+      primaryLabel="Stay on page"
+      secondaryLabel="Back to patients"
+      @primary="confirmDialog = false"
+      @secondary="() => { confirmDialog = false; router.push({ name: 'patients' }) }"
+    />
   </div>
 </template>
 
@@ -288,6 +306,10 @@ import {
   getPatient, getTimeline, getGraph, getNotes, getNote,
   getEncounterDocuments, getDocument, summarize, suggestCoding, reviewFact,
   getLatestSummary, getLatestCoding, listEncounters,
+  // Queue-mode helpers (issue #25). Summary / Coding buttons fire these
+  // and watch the resulting jobId so the page can refresh the
+  // corresponding card without blocking the UI.
+  summarizeQueued, suggestCodingQueued, getJob,
 } from '../api/client.js'
 import { useUiStore } from '../stores/ui.js'
 import MarkdownViewer from '../components/MarkdownViewer.vue'
@@ -299,6 +321,7 @@ import FactCard from '../components/FactCard.vue'
 import SummaryCard from '../components/SummaryCard.vue'
 import CodingCard from '../components/CodingCard.vue'
 import EncounterDialog from './EncounterDialog.vue'
+import JobConfirmationDialog from '../components/JobConfirmationDialog.vue'
 
 const props = defineProps({ id: { type: String, required: true } })
 const ui = useUiStore()
@@ -317,6 +340,12 @@ const selectedDocument = ref(null)
 const encounters = ref([])
 const summary = ref(null)
 const codingResp = ref(null)
+// Queued summary/coding jobs the user kicked off from this page. The
+// confirmation dialog renders from `activeJob` and the polling loop
+// below refreshes the corresponding card when the job finishes.
+const confirmDialog = ref(false)
+const activeJob = ref(null)
+let jobWatchTimer = null
 const summaryCard = ref(null)
 const codingCard = ref(null)
 const busy = reactive({ summary: false, coding: false })
@@ -457,12 +486,20 @@ async function recoverFromAiFailure(loader, name) {
   return null
 }
 
+// Summary / Coding now use the queued ?async=true path (issue #25 backend
+// half landed in PR #26). The button kicks off a job, shows the
+// confirmation dialog, and the per-card auto-refresh below picks up the
+// saved result when the job completes — so the user can switch tabs
+// without losing the result. The sync helpers (summarize / suggestCoding)
+// stay imported for scripted callers / the encounter dialog's fallback.
 async function loadSummary() {
   busy.summary = true
   try {
-    summary.value = await summarize(props.id, { type: 'detailed', includeEvidence: true })
-    ui.success('Summary ready')
-    await revealCard(summaryCard)
+    const res = await summarizeQueued(props.id, { type: 'detailed', includeEvidence: true })
+    activeJob.value = { jobId: res.jobId, type: res.type, kind: 'summary' }
+    confirmDialog.value = true
+    startJobWatch(res.jobId, 'summary')
+    ui.success('Summary queued — we\'ll update the page when ready')
   } catch (err) {
     if (err?.name !== 'CanceledError' && err?.code !== 'ERR_CANCELED') {
       const recovered = await recoverFromAiFailure(() => getLatestSummary(props.id), 'Summary')
@@ -476,9 +513,11 @@ async function loadSummary() {
 async function loadCoding() {
   busy.coding = true
   try {
-    codingResp.value = await suggestCoding(props.id, { standards: ['ICD10', 'SNOMEDCT'], includeEvidence: true })
-    ui.success('Coding suggestion ready')
-    await revealCard(codingCard)
+    const res = await suggestCodingQueued(props.id, { standards: ['ICD10', 'SNOMEDCT'], includeEvidence: true })
+    activeJob.value = { jobId: res.jobId, type: res.type, kind: 'coding' }
+    confirmDialog.value = true
+    startJobWatch(res.jobId, 'coding')
+    ui.success('Coding queued — we\'ll update the page when ready')
   } catch (err) {
     if (err?.name !== 'CanceledError' && err?.code !== 'ERR_CANCELED') {
       const recovered = await recoverFromAiFailure(
@@ -573,6 +612,47 @@ function kindIcon(kind) {
 }
 
 watch(() => props.id, load)
+// Job-completion watcher for the queued Summary / Coding buttons.
+// Polls /api/jobs/{jobId} every 4s; when status flips to completed,
+// re-fetch the corresponding /latest endpoint to refresh the card
+// without forcing a page reload. Failure surfaces a snackbar; canceled
+// jobs (user changed mind or backend crash) drop silently.
+function startJobWatch(jobId, kind) {
+  if (jobWatchTimer) clearInterval(jobWatchTimer)
+  jobWatchTimer = setInterval(async () => {
+    try {
+      const j = await getJob(jobId)
+      if (j.status === 'completed') {
+        clearInterval(jobWatchTimer)
+        jobWatchTimer = null
+        activeJob.value = null
+        if (kind === 'summary') {
+          summary.value = await getLatestSummary(props.id)
+          ui.success('Summary ready')
+          await revealCard(summaryCard)
+        } else if (kind === 'coding') {
+          const cod = await getLatestCoding(props.id)
+          codingResp.value = cod?.payload || null
+          ui.success('Coding ready')
+          await revealCard(codingCard)
+        }
+      } else if (j.status === 'failed') {
+        clearInterval(jobWatchTimer)
+        jobWatchTimer = null
+        activeJob.value = null
+        ui.error(`${kind} job failed — check Debug → AI calls.`)
+      }
+    } catch {
+      // Single missed poll is fine; keep trying. If the job vanishes the
+      // poll will 404 indefinitely — capped at 60 minutes total by the
+      // session lifetime (the page unmount clears the timer).
+    }
+  }, 4_000)
+}
+
 onMounted(load)
-onBeforeUnmount(() => activeAbort && activeAbort.abort())
+onBeforeUnmount(() => {
+  if (activeAbort) activeAbort.abort()
+  if (jobWatchTimer) clearInterval(jobWatchTimer)
+})
 </script>
