@@ -11,10 +11,42 @@ from app.services.patient_facts import gather_patient_facts
 from app.services.summary_store import save_coding
 
 
+def _has_any_codes(raw: dict[str, Any]) -> bool:
+    """Did the model produce SOMETHING actionable? Either a primaryDiagnosis
+    or at least one codingCandidate. Used to decide whether to retry."""
+    if raw.get("primaryDiagnosis"):
+        return True
+    cands = raw.get("codingCandidates") or []
+    return any(c for c in cands if (c or {}).get("code"))
+
+
+_CODING_RETRY_ADDENDUM = (
+    "Your previous response had no codingCandidates AND no primaryDiagnosis. "
+    "That's not acceptable per the schema rules above — empty output forces "
+    "the human coder to redo the work from scratch. Please retry. Pick the "
+    "single most likely primary diagnosis from the patient's problems (any "
+    "tie-break is fine, just commit and note the reason in `warnings`), and "
+    "emit at least one ICD-10 candidate per active problem at lower confidence "
+    "(0.3-0.5 is fine when uncertain). Any caveats belong in `warnings`, not "
+    "as a reason to omit codes."
+)
+
+
 async def suggest_coding(patient_id: str, req: CodingSuggestRequest) -> CodingSuggestResponse:
     facts = await asyncio.to_thread(gather_patient_facts, patient_id)
     provider = get_ai_provider()
-    raw, rec = await provider.suggest_coding(patient_facts=facts, standards=req.standards, patient_id=patient_id)
+    raw, rec = await provider.suggest_coding(
+        patient_facts=facts, standards=req.standards, patient_id=patient_id,
+    )
+    # If the model punted (no primary diagnosis AND no candidates), retry
+    # once with an explicit reminder of the rules from CODING_SUGGEST_SYSTEM.
+    # Only retry when the patient actually has problems — empty input
+    # legitimately produces empty output.
+    if (facts.get("problems") or facts.get("diagnoses")) and not _has_any_codes(raw):
+        raw, rec = await provider.suggest_coding(
+            patient_facts=facts, standards=req.standards, patient_id=patient_id,
+            system_addendum=_CODING_RETRY_ADDENDUM,
+        )
 
     def to_diag(d: dict | None) -> DiagnosisCandidate | None:
         if not d:
