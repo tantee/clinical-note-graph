@@ -102,26 +102,49 @@ def test_dedupe_does_not_collapse_distinct_conditions(fake_store):
     assert values == {"Hypertension", "Breast cancer"}
 
 
-def test_observations_are_not_deduped(fake_store):
-    """Observations (labs) deliberately stay un-deduped — the same lab measured
-    across visits is a longitudinal trend, not noise."""
+def test_observations_dedup_by_name_value_unit_time(fake_store):
+    """Observations dedupe by (name, value, unit, date_time):
+    - same lab, same value, same time → one row (EMR repeated itself)
+    - same lab, different value (different reading) → two rows
+    - same lab, same value, different time → two rows (trend)
+    """
     _seed_one_patient(fake_store)
     fake_store.facts.extend([
-        {"id": "o-1", "patient_id": "HN1", "encounter_id": "E1",
-         "type": "observation", "value": "HbA1c", "normalized_code": "4548-4",
-         "review_status": "ai_suggested",
-         "extra": {"value": "8.4", "unit": "%"}, "confidence": 0.9,
+        # Identical TVS finding mentioned twice in the same EMR section.
+        # Same name + value + unit + time → must collapse into one row.
+        {"id": "o-1a", "patient_id": "HN1", "encounter_id": "E1",
+         "type": "observation", "value": "Uterine mass size",
+         "normalized_code": None, "review_status": "ai_suggested",
+         "extra": {"value": "9*5.9 cm", "unit": "cm"}, "confidence": 0.9,
+         "date_time": "2026-04-01T08:00:00Z",
          "created_at": "2026-04-01T08:00:00Z"},
+        {"id": "o-1b", "patient_id": "HN1", "encounter_id": "E1",
+         "type": "observation", "value": "Uterine mass size",
+         "normalized_code": None, "review_status": "ai_suggested",
+         "extra": {"value": "9*5.9 cm", "unit": "cm"}, "confidence": 0.9,
+         "date_time": "2026-04-01T08:00:00Z",
+         "created_at": "2026-04-01T08:01:00Z"},
+        # HbA1c measured on two different days → both rows survive (trend).
         {"id": "o-2", "patient_id": "HN1", "encounter_id": "E1",
          "type": "observation", "value": "HbA1c", "normalized_code": "4548-4",
          "review_status": "ai_suggested",
+         "extra": {"value": "8.4", "unit": "%"}, "confidence": 0.9,
+         "date_time": "2026-04-01T08:00:00Z",
+         "created_at": "2026-04-01T08:02:00Z"},
+        {"id": "o-3", "patient_id": "HN1", "encounter_id": "E1",
+         "type": "observation", "value": "HbA1c", "normalized_code": "4548-4",
+         "review_status": "ai_suggested",
          "extra": {"value": "7.2", "unit": "%"}, "confidence": 0.9,
+         "date_time": "2026-04-02T08:00:00Z",
          "created_at": "2026-04-02T08:00:00Z"},
     ])
 
     from app.services.patient_facts import gather_patient_facts
     obs = gather_patient_facts("HN1")["observations"]
-    assert len(obs) == 2, "same lab measured twice should produce two rows for trending"
+    assert len(obs) == 3, (
+        "expected: 1 deduped Uterine mass + 2 HbA1c readings (trend), "
+        f"got {[(o['value'], o.get('extra', {}).get('value'), o.get('date_time')) for o in obs]}"
+    )
 
 
 def test_dedupe_falls_back_to_value_when_no_code(fake_store):

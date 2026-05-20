@@ -60,6 +60,50 @@ def _dedupe_patient_facts(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return list(out.values())
 
 
+def _dedupe_observations(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Observations get a different dedup rule than conditions / meds.
+
+    Same lab measured at two different times → keep both (it's a trend).
+    Same lab with the same value and unit at the same time → keep one
+    (the EMR repeated itself, e.g. TVS finding mentioned in IMP and Intraop).
+
+    Key is (name lowercased, value, unit, date_time). Within a key we use
+    the same confidence + evidence-merge rule as conditions.
+    """
+    out: dict[tuple, dict[str, Any]] = {}
+    for f in rows:
+        if not f.get("value"):
+            continue
+        # The "name" of an observation lives in facts.value (e.g. "HbA1c").
+        # The numeric reading is buried inside extra.value, extra.unit.
+        extra = f.get("extra") or {}
+        key = (
+            (f.get("value") or "").strip().lower(),
+            (extra.get("value") if isinstance(extra, dict) else None),
+            (extra.get("unit") if isinstance(extra, dict) else None),
+            str(f.get("date_time") or ""),
+        )
+        existing = out.get(key)
+        if existing is None:
+            out[key] = dict(f)
+            continue
+        f_conf = f.get("confidence") or 0.0
+        e_conf = existing.get("confidence") or 0.0
+        rep = f if (f_conf, str(f.get("created_at") or "")) > (e_conf, str(existing.get("created_at") or "")) else existing
+        loser = existing if rep is f else f
+        merged = dict(rep)
+        seen: set[str] = set()
+        evid: list[str] = []
+        for src in (rep.get("evidence_text"), loser.get("evidence_text")):
+            if src and src not in seen:
+                evid.append(src)
+                seen.add(src)
+        if evid:
+            merged["evidence_text"] = " · ".join(evid)
+        out[key] = merged
+    return list(out.values())
+
+
 def gather_patient_facts(patient_id: str, *, start: str | None = None, end: str | None = None) -> dict[str, Any]:
     """Aggregate everything we know about a patient from Postgres in one round-trip per table."""
     where_clauses = ["patient_id = :pid"]
@@ -90,6 +134,8 @@ def gather_patient_facts(patient_id: str, *, start: str | None = None, end: str 
     for fact_type in list(grouped):
         if fact_type in _PATIENT_DEDUPE_TYPES:
             grouped[fact_type] = _dedupe_patient_facts(grouped[fact_type])
+        elif fact_type == "observation":
+            grouped[fact_type] = _dedupe_observations(grouped[fact_type])
 
     return {
         "patient": dict(patient) if patient else None,

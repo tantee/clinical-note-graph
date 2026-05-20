@@ -31,6 +31,27 @@ async def suggest_coding(patient_id: str, req: CodingSuggestRequest) -> CodingSu
         except Exception:
             continue
 
+    # Models occasionally collapse list-valued fields into prose. Coerce so
+    # one wandering string doesn't 500 the whole coding endpoint — the schema
+    # requires list[str] for warnings and list[dict] for evidence.
+    raw_warnings = raw.get("warnings") or []
+    if isinstance(raw_warnings, str):
+        raw_warnings = [raw_warnings] if raw_warnings.strip() else []
+    elif not isinstance(raw_warnings, list):
+        raw_warnings = []
+
+    raw_evidence = raw.get("evidence") or []
+    if isinstance(raw_evidence, str):
+        raw_evidence = [{"text": raw_evidence}] if raw_evidence.strip() else []
+    elif isinstance(raw_evidence, list):
+        # Drop any non-dict entries (some models emit a list of strings here).
+        raw_evidence = [
+            (e if isinstance(e, dict) else {"text": str(e)})
+            for e in raw_evidence
+        ]
+    else:
+        raw_evidence = []
+
     response = CodingSuggestResponse(
         patientId=patient_id,
         primaryDiagnosis=to_diag(raw.get("primaryDiagnosis")),
@@ -38,8 +59,8 @@ async def suggest_coding(patient_id: str, req: CodingSuggestRequest) -> CodingSu
         complications=[d for d in (to_diag(x) for x in raw.get("complications", []) or []) if d],
         comorbidities=[d for d in (to_diag(x) for x in raw.get("comorbidities", []) or []) if d],
         codingCandidates=candidates,
-        evidence=raw.get("evidence", []) or [],
-        warnings=raw.get("warnings", []) or [],
+        evidence=raw_evidence,
+        warnings=[str(w) for w in raw_warnings],
     )
     await asyncio.to_thread(
         save_coding,

@@ -286,7 +286,9 @@ def get_document(patient_id: str, document_id: str, include_raw: bool = Query(Tr
     # same finding in IMP / Intraop / Discharge sections; the LLM faithfully
     # produces one fact per mention. Reviewers want one row with evidence
     # accumulated, not three separate rows.
-    from app.services.patient_facts import _dedupe_patient_facts, _PATIENT_DEDUPE_TYPES
+    from app.services.patient_facts import (
+        _dedupe_patient_facts, _dedupe_observations, _PATIENT_DEDUPE_TYPES,
+    )
 
     normalised = [
         {**dict(f), "id": str(f["id"]),
@@ -299,6 +301,8 @@ def get_document(patient_id: str, document_id: str, include_raw: bool = Query(Tr
     for t in list(by_type):
         if t in _PATIENT_DEDUPE_TYPES:
             by_type[t] = _dedupe_patient_facts(by_type[t])
+        elif t == "observation":
+            by_type[t] = _dedupe_observations(by_type[t])
     deduped = [f for rows in by_type.values() for f in rows]
     # Preserve the (type, created_at) ordering the SQL produced.
     deduped.sort(key=lambda f: (f.get("type") or "", str(f.get("created_at") or "")))
