@@ -58,6 +58,15 @@ class Settings(BaseSettings):
     JOB_LOCK_SECONDS: int = 120
     JOB_GRACE_SECONDS: int = 15
 
+    # De-identification (HIPAA Safe Harbor) — applied at the outbound boundary
+    # in ai_provider, before any payload leaves the host. The on-disk data
+    # model stays unredacted.
+    #   off          — disable the redactor entirely (BAA-bound providers)
+    #   regex_only   — fast regex pass; no Presidio / spaCy / PyThaiNLP overhead
+    #   safe_harbor  — full pipeline (regex + Presidio + Thai recognizers)
+    DEIDENTIFY_LEVEL: str = "safe_harbor"
+    DEIDENTIFY_NER_THRESHOLD: float = 0.5
+
     @property
     def pg_dsn(self) -> str:
         return (
