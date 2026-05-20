@@ -122,8 +122,20 @@ async def ask(req: RagAskRequest) -> RagAskResponse:
     )
 
 
-async def search_patients(q: str, limit: int = 10) -> PatientSearchResponse:
-    """Free-text → ranked patient list by max-similarity of any embedding."""
+async def search_patients(
+    q: str,
+    limit: int = 10,
+    min_score: float = 0.35,
+) -> PatientSearchResponse:
+    """Free-text → ranked patient list by max-similarity of any embedding.
+
+    `min_score` filters out patients whose best match is too weak to be
+    useful (cosine similarity is in [0, 1] after the `1 - distance`
+    transform). 0.35 is a conservative threshold for text-embedding-3-small
+    — strong matches sit around 0.5+, weak coincidental term overlap lands
+    around 0.2-0.3 and is more confusing than helpful. Callers can override
+    via the `minScore` query param (set to 0 to disable).
+    """
     settings: Settings = effective_settings()
     t0 = asyncio.get_running_loop().time()
     provider = get_ai_provider()
@@ -159,13 +171,14 @@ async def search_patients(q: str, limit: int = 10) -> PatientSearchResponse:
         FROM ranked r
         LEFT JOIN patients p ON p.patient_id = r.patient_id
         GROUP BY r.patient_id, p.name
+        HAVING MAX(r.score) >= :min_score
         ORDER BY MAX(r.score) DESC
         LIMIT :limit
     """
     with db_session() as s:
         rows = s.execute(
             text(sql),
-            {"qvec": _pgvector_literal(qvec), "limit": limit},
+            {"qvec": _pgvector_literal(qvec), "limit": limit, "min_score": min_score},
         ).mappings().all()
 
     results = [

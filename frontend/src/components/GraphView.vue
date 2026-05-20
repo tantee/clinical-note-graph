@@ -181,6 +181,13 @@ function themeColors() {
 
 function shortLabel(n) {
   const d = n.data || {}
+  // Observations carry the measurement name on `name` and the reading on
+  // `value` ("Uterine size" / "12 weeks"). Showing only `value` is what made
+  // four different observations all render as e.g. "9*5.9 cm" — combine
+  // both so each node is visually distinct.
+  if (n.label === 'Observation' && d.name) {
+    return d.value ? `${d.name}: ${d.value}` : d.name
+  }
   return d.value || d.name || d.description || d.patientId || d.encounterId || n.label
 }
 function tooltip(n) {

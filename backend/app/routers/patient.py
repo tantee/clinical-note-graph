@@ -163,13 +163,23 @@ def rebuild_graph(patient_id: str) -> dict[str, Any]:
     `graph_updater` against the rows that are already there, with no
     additional AI calls.
 
-    Idempotent — re-running on a populated graph is a no-op (`MERGE` on
-    every node and relationship).
+    The graph is wiped first (Patient node retained, everything else
+    cleared) so duplicate nodes accumulated from prior incremental writes
+    are removed. Observation MERGEs key on `dateTime`, which falls back
+    to `datetime()` (NOW) for un-timestamped readings — every rebuild
+    would otherwise add new copies. The facts pushed back in are run
+    through the same dedup helpers the Overview tab uses, so identical
+    EMR mentions don't produce parallel Neo4j nodes.
 
-    Returns per-document counts so the caller (or the UI button that
-    triggers this) can confirm something was actually written.
+    Returns wipe counts + per-document write counts so the caller can
+    confirm something was actually replaced.
     """
-    from app.services.graph_updater import backfill_graph_for_document
+    from app.services.graph_updater import (
+        backfill_graph_for_document, wipe_patient_subgraph,
+    )
+    from app.services.patient_facts import (
+        _PATIENT_DEDUPE_TYPES, _dedupe_patient_facts, _dedupe_observations,
+    )
 
     with db_session() as s:
         patient_row = s.execute(
@@ -198,7 +208,11 @@ def rebuild_graph(patient_id: str) -> dict[str, Any]:
     if not documents:
         # No documents = nothing the AI ever extracted. Encounters alone
         # don't produce a useful graph; tell the caller to ingest first.
-        return {"documents": 0, "perDocument": []}
+        return {"documents": 0, "perDocument": [], "wiped": {"labels": []}}
+
+    # Wipe first so the next write doesn't pile on top of whatever was
+    # there (duplicate Observation nodes are the common case).
+    wiped = wipe_patient_subgraph(patient_id)
 
     encounters_by_id = {e["encounter_id"]: dict(e) for e in encounters}
     facts_by_doc: dict[str, list[dict[str, Any]]] = {}
@@ -208,6 +222,22 @@ def rebuild_graph(patient_id: str) -> dict[str, Any]:
         if d.get("confidence") is not None:
             d["confidence"] = float(d["confidence"])
         facts_by_doc.setdefault(d["document_id"] or "", []).append(d)
+
+    # Dedup per document before pushing into Neo4j so the same finding
+    # mentioned in IMP / Intraop / Discharge sections doesn't become three
+    # graph nodes. The helpers preserve evidence text via `·` join.
+    def _dedup_doc_facts(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        by_type: dict[str, list[dict[str, Any]]] = {}
+        for f in rows:
+            by_type.setdefault(f["type"], []).append(f)
+        for t in list(by_type):
+            if t in _PATIENT_DEDUPE_TYPES:
+                by_type[t] = _dedupe_patient_facts(by_type[t])
+            elif t == "observation":
+                by_type[t] = _dedupe_observations(by_type[t])
+        return [f for rows in by_type.values() for f in rows]
+
+    facts_by_doc = {k: _dedup_doc_facts(v) for k, v in facts_by_doc.items()}
 
     p_dict = {
         "patientId": patient_id,
@@ -241,7 +271,7 @@ def rebuild_graph(patient_id: str) -> dict[str, Any]:
             continue
         per_doc.append({"documentId": d["document_id"], "counts": counts})
 
-    return {"documents": len(documents), "perDocument": per_doc}
+    return {"documents": len(documents), "perDocument": per_doc, "wiped": wiped}
 
 
 @router.get("/patient/{patient_id}/notes")

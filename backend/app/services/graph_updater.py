@@ -253,6 +253,45 @@ FOREACH (_ IN CASE WHEN c IS NULL THEN [] ELSE [1] END |
 """
 
 
+def wipe_patient_subgraph(patient_id: str) -> dict[str, int]:
+    """Delete the patient's encounters, documents, and all derived nodes
+    (conditions, medications, observations, …) plus their relationships,
+    leaving the `Patient` node intact so re-ingest doesn't have to recreate
+    it. Used by the rebuild endpoint to clean up duplicate nodes accumulated
+    from prior incremental writes — the Observation Cypher MERGE keys on
+    `dateTime` which defaults to `datetime()` (NOW) when missing, so every
+    ingest with un-timestamped readings creates fresh nodes.
+
+    Returns the labels that were targeted so the caller can confirm the
+    wipe ran. Counts aren't returned to keep the path simple (no RETURN
+    queries to round-trip).
+    """
+    ensure_constraints()
+    deleted_labels: list[str] = []
+    with neo4j_session() as s:
+        # Encounters + documents link from the Patient via HAS_ENCOUNTER /
+        # HAS_DOCUMENT and don't carry a patientId property of their own.
+        s.run(
+            "MATCH (p:Patient {patientId: $pid})-[:HAS_ENCOUNTER|HAS_DOCUMENT*1..2]->(n) "
+            "WHERE n:Encounter OR n:Document "
+            "DETACH DELETE n",
+            {"pid": patient_id},
+        )
+        deleted_labels.extend(["Encounter", "Document"])
+        # Per-fact nodes carry patientId; one query per label keeps a single
+        # failure from rolling back the whole wipe.
+        for label in (
+            "Condition", "Medication", "Observation", "Procedure",
+            "Allergy", "Plan", "CodingCandidate",
+        ):
+            s.run(
+                f"MATCH (n:{label} {{patientId: $pid}}) DETACH DELETE n",
+                {"pid": patient_id},
+            )
+            deleted_labels.append(label)
+    return {"labels": deleted_labels}
+
+
 def backfill_graph_for_document(
     patient: dict[str, Any],
     encounter: dict[str, Any],
