@@ -15,6 +15,7 @@ from app.schemas.coding import (
 from app.services.encounter_summary import (
     make_encounter_summary, suggest_encounter_coding,
 )
+from app.services.patient_facts import gather_encounter_facts
 from app.services.summary_store import latest_coding, latest_summary
 
 router = APIRouter(prefix="/api", tags=["encounter"])
@@ -28,6 +29,23 @@ def verify_encounter(patient_id: str, encounter_id: str) -> None:
         ).mappings().first()
     if not row or row["patient_id"] != patient_id:
         raise HTTPException(status_code=404, detail="Encounter not found for patient")
+
+
+@router.get(
+    "/patient/{patient_id}/encounter/{encounter_id}/facts",
+    dependencies=[Depends(verify_encounter)],
+)
+def encounter_facts(patient_id: str, encounter_id: str) -> dict[str, Any]:
+    """Aggregate facts for the encounter dialog's Detail tab.
+
+    Returns the encounter row, the this-encounter buckets (problems /
+    medications / observations / procedures / plans / allergies / diagnoses /
+    codingCandidates), background context (chronic problems, home meds,
+    known allergies aggregated across the patient's other encounters), and
+    the encounter's documents. This is what powers the dialog's left column
+    before the user has generated a summary or coding for the encounter.
+    """
+    return gather_encounter_facts(encounter_id)
 
 
 @router.post(

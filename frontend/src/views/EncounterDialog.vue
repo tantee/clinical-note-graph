@@ -55,6 +55,39 @@
               <v-col cols="12" md="8">
                 <SummaryCard :value="summary" />
                 <CodingCard :value="codingResp" />
+
+                <!-- This-encounter facts: rendered straight from
+                     gather_encounter_facts so the left column is populated
+                     before the user generates a summary / coding. Each
+                     bucket only appears when it has rows; the whole card
+                     collapses if the encounter has no extracted facts
+                     (which is the case for encounters whose source document
+                     hasn't been re-extracted yet). -->
+                <v-card v-if="hasThisEncounterFacts" class="mt-4">
+                  <SectionHeader title="This encounter" icon="mdi-clipboard-text-outline" />
+                  <v-divider />
+                  <v-card-text>
+                    <FactSection v-if="thisEncounter.problems.length"
+                                 title="Problems" icon="mdi-medical-bag"
+                                 :items="thisEncounter.problems" />
+                    <FactSection v-if="thisEncounter.medications.length"
+                                 title="Medications" icon="mdi-pill"
+                                 :items="thisEncounter.medications" />
+                    <FactSection v-if="thisEncounter.observations.length"
+                                 title="Observations" icon="mdi-test-tube"
+                                 :items="thisEncounter.observations" />
+                    <FactSection v-if="thisEncounter.procedures.length"
+                                 title="Procedures" icon="mdi-scalpel"
+                                 :items="thisEncounter.procedures" />
+                    <FactSection v-if="thisEncounter.plans.length"
+                                 title="Plan" icon="mdi-clipboard-check-outline"
+                                 :items="thisEncounter.plans" />
+                    <FactSection v-if="thisEncounter.diagnoses.length"
+                                 title="Diagnoses" icon="mdi-stethoscope"
+                                 :items="thisEncounter.diagnoses" />
+                  </v-card-text>
+                </v-card>
+
                 <v-card v-if="docs.length" class="mt-4">
                   <SectionHeader title="Documents" icon="mdi-file-multiple-outline" />
                   <v-divider />
@@ -64,6 +97,12 @@
                                  :subtitle="`v${d.version} · ${d.format}`" />
                   </v-list>
                 </v-card>
+
+                <v-alert v-if="!summary && !codingResp && !hasThisEncounterFacts && !docs.length"
+                         type="info" variant="tonal" class="mt-2">
+                  This encounter has no extracted facts or documents yet.
+                  Click <strong>Summarize</strong> or <strong>Coding</strong> to generate output.
+                </v-alert>
               </v-col>
               <v-col cols="12" md="4">
                 <v-card>
@@ -97,17 +136,19 @@
 </template>
 
 <script setup>
-import { onMounted, reactive, ref, watch } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import {
+  getEncounterFacts,
   getLatestEncounterSummary, getLatestEncounterCoding,
-  summarizeEncounter, suggestEncounterCoding, listEncounters,
+  summarizeEncounter, suggestEncounterCoding,
 } from '../api/client.js'
 import { useUiStore } from '../stores/ui.js'
 import SummaryCard from '../components/SummaryCard.vue'
 import CodingCard from '../components/CodingCard.vue'
 import SectionHeader from '../components/SectionHeader.vue'
 import EmptyState from '../components/EmptyState.vue'
+import FactSection from '../components/FactSection.vue'
 import GraphView from '../components/GraphView.vue'
 
 const props = defineProps({
@@ -124,40 +165,61 @@ const loading = ref(true)
 const error = ref('')
 const encounter = ref(null)
 const background = ref({ chronicProblems: [], homeMedications: [], knownAllergies: [] })
+const thisEncounter = ref({
+  problems: [], medications: [], observations: [], procedures: [],
+  plans: [], allergies: [], diagnoses: [], codingCandidates: [],
+})
 const docs = ref([])
 const summary = ref(null)
 const codingResp = ref(null)
 const busy = reactive({ summary: false, coding: false })
 
-function extractBackground(evidence) {
-  if (!evidence || typeof evidence !== 'object' || !evidence.background) {
-    return { chronicProblems: [], homeMedications: [], knownAllergies: [] }
-  }
-  return {
-    chronicProblems: evidence.background.chronicProblems || [],
-    homeMedications: evidence.background.homeMedications || [],
-    knownAllergies: evidence.background.knownAllergies || [],
-  }
-}
+const hasThisEncounterFacts = computed(() => {
+  const t = thisEncounter.value
+  return (
+    t.problems.length || t.medications.length || t.observations.length ||
+    t.procedures.length || t.plans.length || t.diagnoses.length
+  )
+})
 
 async function fetchAll() {
   loading.value = true
   error.value = ''
   try {
-    const [sum, cod, list] = await Promise.all([
+    // gather_encounter_facts is the single source of truth for the dialog
+    // header (encounter metadata), the left-column facts, the right-column
+    // background, AND the documents list. Older code split this across
+    // three endpoints and silently rendered a blank pane when none of them
+    // returned anything — see bug fix in fix/encounter-dialog-blank.
+    const [facts, sum, cod] = await Promise.all([
+      getEncounterFacts(props.patientId, props.eid).catch((e) => {
+        if (e?.response?.status === 404) error.value = 'Encounter not found for this patient.'
+        return null
+      }),
       getLatestEncounterSummary(props.patientId, props.eid).catch(() => null),
       getLatestEncounterCoding(props.patientId, props.eid).catch(() => null),
-      listEncounters(props.patientId).catch(() => []),
     ])
+    if (facts) {
+      encounter.value = facts.encounter || null
+      thisEncounter.value = {
+        problems:         facts.thisEncounter?.problems || [],
+        medications:      facts.thisEncounter?.medications || [],
+        observations:     facts.thisEncounter?.observations || [],
+        procedures:       facts.thisEncounter?.procedures || [],
+        plans:            facts.thisEncounter?.plans || [],
+        allergies:        facts.thisEncounter?.allergies || [],
+        diagnoses:        facts.thisEncounter?.diagnoses || [],
+        codingCandidates: facts.thisEncounter?.codingCandidates || [],
+      }
+      background.value = {
+        chronicProblems: facts.background?.chronicProblems || [],
+        homeMedications: facts.background?.homeMedications || [],
+        knownAllergies:  facts.background?.knownAllergies || [],
+      }
+      docs.value = facts.documents || []
+    }
     summary.value = sum
     codingResp.value = cod?.payload || cod || null
-    background.value = extractBackground(sum?.evidence)
-    const match = (list || []).find((e) => e.encounterId === props.eid)
-    if (!match) {
-      error.value = 'Encounter not found for this patient.'
-    } else {
-      encounter.value = match
-    }
   } finally {
     loading.value = false
   }
