@@ -240,12 +240,26 @@ function render() {
     shape: 'dot',
     size: n.label === 'Patient' ? 24 : 14,
   })))
-  const edges = new DataSet((data.value.edges || []).map((e, i) => ({
-    id: 'e' + i, from: e.from, to: e.to, label: e.type, arrows: 'to',
-    font: { size: 9, color: labelColor, strokeColor, strokeWidth: 3 },
-    color: { color: '#9e9e9e', highlight: '#1f6feb' },
-    smooth: { type: 'continuous' },
-  })))
+  const edges = new DataSet((data.value.edges || []).map((e, i) => {
+    // Co-occurrence edges connect peer Conditions, so they shouldn't look
+    // like the primary hierarchy. Dashed + lighter + no arrow.
+    const isCoOccurs = e.type === 'CO_OCCURS'
+    // TREATED_BY / MONITORED_BY / PLAN_FOR run from a Condition down to a
+    // related fact — paint them in the primary tone so the hierarchy is
+    // visually obvious vs. the muted CO_OCCURS edges.
+    const isHierarchical = e.type === 'TREATED_BY' || e.type === 'MONITORED_BY' || e.type === 'PLAN_FOR'
+    return {
+      id: 'e' + i, from: e.from, to: e.to, label: e.type,
+      arrows: isCoOccurs ? '' : 'to',
+      dashes: isCoOccurs ? [2, 4] : false,
+      font: { size: 9, color: labelColor, strokeColor, strokeWidth: 3 },
+      color: {
+        color: isCoOccurs ? '#cfd8dc' : (isHierarchical ? '#1f6feb' : '#9e9e9e'),
+        highlight: '#1f6feb',
+      },
+      smooth: { type: 'continuous' },
+    }
+  }))
   if (network) network.destroy()
   network = new Network(container.value, { nodes, edges }, {
     physics: { stabilization: { iterations: 200 }, barnesHut: { springLength: 140 } },

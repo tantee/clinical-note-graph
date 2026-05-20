@@ -178,3 +178,123 @@ def test_rebuild_graph_replays_facts_per_document(app_client, fake_store, stub_n
     assert any("MERGE (p:Patient" in q for q in queries)
     assert any("MERGE (c:Condition" in q for q in queries)
     assert any("MERGE (med:Medication" in q for q in queries)
+
+
+# ---------------------------------------------------------------------------
+# Meaningful inter-fact edges — fix for "everything points to Patient"
+# ---------------------------------------------------------------------------
+
+
+def test_treats_edge_routes_med_to_condition(app_client, stub_neo4j, fake_store):
+    """When Cypher returns a {medName, condValue} pair, the medication node
+    should attach to the matching condition via TREATED_BY rather than
+    hanging directly off the patient."""
+    fake_store.patients["HN-1"] = {"patient_id": "HN-1", "name": "Test"}
+    row = {
+        "p": {"patientId": "HN-1"},
+        "encounters": [{"encounterId": "E1"}],
+        "conditions": [{"encounterId": "E1", "value": "Type 2 diabetes",
+                        "normalized_code": "E11.9"}],
+        "medications": [{"encounterId": "E1", "name": "Metformin",
+                         "rxNorm": "6809"}],
+        "observations": [],
+        "plans": [],
+        "allergies": [],
+        "treats_pairs": [{"medName": "Metformin", "condValue": "Type 2 diabetes"}],
+        "addresses_pairs": [],
+    }
+    stub_neo4j.prime([row])
+    r = app_client.get("/api/patient/HN-1/graph")
+    assert r.status_code == 200
+    body = r.json()
+    edge_types = {(e["type"], e["from"], e["to"]) for e in body["edges"]}
+    cond_id = next(n["id"] for n in body["nodes"] if n["label"] == "Condition")
+    med_id = next(n["id"] for n in body["nodes"] if n["label"] == "Medication")
+    assert ("TREATED_BY", cond_id, med_id) in edge_types, (
+        f"medication should attach via TREATED_BY when a TREATS edge exists; "
+        f"got edges: {edge_types}"
+    )
+    # And no fallback ON_MEDICATION edge from the patient — only one parent.
+    assert not any(t == "ON_MEDICATION" and to == med_id for t, _, to in edge_types)
+
+
+def test_observation_heuristic_links_hba1c_to_diabetes(app_client, stub_neo4j, fake_store):
+    """HbA1c probes diabetes — the heuristic table should route it to the
+    diabetes condition rather than leaving it dangling off the patient."""
+    fake_store.patients["HN-1"] = {"patient_id": "HN-1", "name": "Test"}
+    row = {
+        "p": {"patientId": "HN-1"},
+        "encounters": [{"encounterId": "E1"}],
+        "conditions": [{"encounterId": "E1", "value": "Type 2 diabetes mellitus",
+                        "normalized_code": "E11.9"}],
+        "medications": [],
+        "observations": [{"encounterId": "E1", "name": "HbA1c", "value": "8.4",
+                          "unit": "%", "loinc": "4548-4"}],
+        "plans": [],
+        "allergies": [],
+        "treats_pairs": [],
+        "addresses_pairs": [],
+    }
+    stub_neo4j.prime([row])
+    r = app_client.get("/api/patient/HN-1/graph")
+    assert r.status_code == 200
+    body = r.json()
+    edge_types = {(e["type"], e["from"], e["to"]) for e in body["edges"]}
+    cond_id = next(n["id"] for n in body["nodes"] if n["label"] == "Condition")
+    obs_id = next(n["id"] for n in body["nodes"] if n["label"] == "Observation")
+    assert ("MONITORED_BY", cond_id, obs_id) in edge_types, edge_types
+
+
+def test_cooccurrence_edges_require_multiple_encounters(app_client, stub_neo4j, fake_store):
+    """A pair of conditions co-occurring in TWO or more encounters is a
+    chronic comorbidity signal — emit a CO_OCCURS edge. Co-occurring in
+    just one encounter is incidental and would otherwise produce N² edges
+    for a typical single-visit ingest; the threshold filters that out."""
+    fake_store.patients["HN-1"] = {"patient_id": "HN-1", "name": "Test"}
+    row = {
+        "p": {"patientId": "HN-1"},
+        "encounters": [{"encounterId": "E1"}, {"encounterId": "E2"}],
+        "conditions": [
+            {"encounterId": "E1", "value": "Type 2 diabetes", "normalized_code": "E11.9"},
+            {"encounterId": "E1", "value": "Hypertension", "normalized_code": "I10"},
+        ],
+        "medications": [], "observations": [], "plans": [], "allergies": [],
+        "treats_pairs": [], "addresses_pairs": [],
+        # Same pair seen in two encounters → meets the threshold.
+        "cooccurs_triples": [
+            {"a": "Hypertension", "b": "Type 2 diabetes", "eid": "E1"},
+            {"a": "Hypertension", "b": "Type 2 diabetes", "eid": "E2"},
+        ],
+    }
+    stub_neo4j.prime([row])
+    r = app_client.get("/api/patient/HN-1/graph")
+    assert r.status_code == 200
+    edges = r.json()["edges"]
+    co_occurs = [e for e in edges if e["type"] == "CO_OCCURS"]
+    assert len(co_occurs) == 1, f"expected exactly one CO_OCCURS edge, got {co_occurs}"
+    assert co_occurs[0]["shared"] == 2
+
+
+def test_cooccurrence_skips_single_encounter_pairs(app_client, stub_neo4j, fake_store):
+    """One-encounter co-occurrence is too noisy (a single-visit ingest with
+    9 conditions would otherwise produce 36 dashed edges). Skip below the
+    threshold."""
+    fake_store.patients["HN-1"] = {"patient_id": "HN-1", "name": "Test"}
+    row = {
+        "p": {"patientId": "HN-1"},
+        "encounters": [{"encounterId": "E1"}],
+        "conditions": [
+            {"encounterId": "E1", "value": "Type 2 diabetes", "normalized_code": "E11.9"},
+            {"encounterId": "E1", "value": "Hypertension", "normalized_code": "I10"},
+        ],
+        "medications": [], "observations": [], "plans": [], "allergies": [],
+        "treats_pairs": [], "addresses_pairs": [],
+        "cooccurs_triples": [
+            {"a": "Hypertension", "b": "Type 2 diabetes", "eid": "E1"},
+        ],
+    }
+    stub_neo4j.prime([row])
+    r = app_client.get("/api/patient/HN-1/graph")
+    edges = r.json()["edges"]
+    co_occurs = [e for e in edges if e["type"] == "CO_OCCURS"]
+    assert len(co_occurs) == 0, "single-encounter pair should not emit CO_OCCURS"

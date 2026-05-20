@@ -487,6 +487,20 @@ def _graph_cypher(
         "OPTIONAL MATCH (e)-[:PRESCRIBED]->(m:Medication)" + fact_filter.replace("n.", "m."),
         "OPTIONAL MATCH (e)-[:HAS_PLAN]->(pl:Plan)" + fact_filter.replace("n.", "pl."),
         "OPTIONAL MATCH (p)-[:HAS_ALLERGY]->(a:Allergy)" + fact_filter.replace("n.", "a."),
+        # Cross-fact edges the ingest pipeline already stores: surface them so
+        # the rendered graph isn't just a star around the patient.
+        "OPTIONAL MATCH (m)-[:TREATS]->(treats_c:Condition)",
+        "OPTIONAL MATCH (pl)-[:ADDRESSES]->(addr_c:Condition)",
+        # Conditions that share at least one encounter — used to draw a
+        # faint CO_OCCURS link between them. Pair filter `c1.value < c2.value`
+        # gives each unordered pair once. Real Neo4j stores conditions as
+        # longitudinal nodes (one per (patientId, value)) and the encounter
+        # linkage lives on the [:MENTIONS] relationship — that's why we
+        # can't just read `encounterId` off the Condition.
+        "OPTIONAL MATCH (cc1:Condition {patientId: $pid})"
+        "<-[:MENTIONS]-(:Encounter)-[:MENTIONS]->"
+        "(cc2:Condition {patientId: $pid})"
+        " WHERE cc1.value < cc2.value",
     ]
     if include_documents:
         parts.append("OPTIONAL MATCH (e)-[:HAS_DOCUMENT]->(d:Document)")
@@ -499,10 +513,116 @@ def _graph_cypher(
         "collect(DISTINCT o) AS observations, "
         "collect(DISTINCT m) AS medications, "
         "collect(DISTINCT pl) AS plans, "
-        "collect(DISTINCT a) AS allergies"
+        "collect(DISTINCT a) AS allergies, "
+        # Returned as pair lists so _materialize_rows can build edges
+        # between specific nodes rather than recomputing the relationship.
+        "collect(DISTINCT {medName: m.name, condValue: treats_c.value}) AS treats_pairs, "
+        "collect(DISTINCT {planDesc: pl.description, condValue: addr_c.value}) AS addresses_pairs, "
+        # Distinct (cond1, cond2, encounter) triples — _add_cooccurrence_edges
+        # counts encounters per pair so it can apply a min-encounters
+        # threshold and only emit clinically meaningful comorbidity links.
+        "collect(DISTINCT {a: cc1.value, b: cc2.value, eid: e.encounterId}) AS cooccurs_triples"
     )
     cypher = "\n        ".join(parts)
     return cypher, {"pid": patient_id, "eids": encounter_ids}
+
+
+# Conservative observation → condition map. Each value is a list of
+# substrings that, if present in a condition's value, signal the
+# observation probes that condition. Keep this short and high-precision
+# — a wrong link confuses the reader more than the missing one helps.
+_OBS_TO_CONDITION_SUBSTRINGS: dict[str, tuple[str, ...]] = {
+    "hba1c":             ("diabetes", "dm"),
+    "a1c":               ("diabetes", "dm"),
+    "glucose":           ("diabetes", "dm", "hypoglyc", "hyperglyc"),
+    "blood pressure":    ("hypertension", "htn"),
+    "bp":                ("hypertension", "htn"),
+    "creatinine":        ("kidney", "renal", "ckd"),
+    "egfr":              ("kidney", "renal", "ckd"),
+    "hemoglobin":        ("anemia", "anaemia"),
+    "hb":                ("anemia", "anaemia"),
+    "spo2":              ("copd", "asthma", "pneumonia", "hypoxia"),
+    "ldl":               ("hyperlipid", "dyslipid", "hypercholest"),
+    "hdl":               ("hyperlipid", "dyslipid", "hypercholest"),
+    "ast":               ("hepatitis", "liver", "cirrhosis"),
+    "alt":               ("hepatitis", "liver", "cirrhosis"),
+    "tsh":               ("thyroid", "hypothyroid", "hyperthyroid"),
+    "platelets":         ("thrombocytopen",),
+}
+
+
+def _observation_target_condition(
+    obs: dict[str, Any],
+    cond_id_by_value: dict[str, str],
+    cond_data_by_id: dict[str, dict[str, Any]],
+) -> str | None:
+    """Look up which condition this observation probes, if any.
+
+    Two passes:
+    1. Heuristic substring map — HbA1c probes anything mentioning 'diabetes'.
+    2. If the observation's name is itself a condition value (unlikely but
+       cheap to check), link to that condition.
+
+    Returns the condition's node id, or None when no link applies."""
+    name_cf = (obs.get("name") or "").strip().casefold()
+    if not name_cf:
+        return None
+    # Pass 2 (cheaper, exact-ish): exact name match against a condition value.
+    if name_cf in cond_id_by_value:
+        return cond_id_by_value[name_cf]
+    # Pass 1: heuristic substring map.
+    candidates = _OBS_TO_CONDITION_SUBSTRINGS.get(name_cf, ())
+    if not candidates:
+        return None
+    for cond_cf, cid in cond_id_by_value.items():
+        if any(needle in cond_cf for needle in candidates):
+            return cid
+    return None
+
+
+_COOCCURS_MIN_ENCOUNTERS = 2
+
+
+def _add_cooccurrence_edges(
+    cooccurs_triples: list[dict[str, Any]],
+    cond_id_by_value: dict[str, str],
+    edges: list[dict[str, Any]],
+) -> None:
+    """Link conditions that co-occur across multiple encounters with a
+    faint CO_OCCURS edge.
+
+    Two conditions in the SAME single visit aren't necessarily linked —
+    that's just whatever the clinician documented that day. Two conditions
+    that appear TOGETHER in two or more separate visits is a real
+    comorbidity signal (chronic diabetes + hypertension is the canonical
+    example).
+
+    `cooccurs_triples` comes from Cypher as
+    `[{a: cond1_value, b: cond2_value, eid: encounterId}]`. The pair
+    filter `c1.value < c2.value` upstream gives each unordered (a, b)
+    once per encounter. We count distinct encounters per pair and only
+    emit the edge when the count meets the threshold."""
+    counts: dict[tuple[str, str], set[str]] = {}
+    for t in (cooccurs_triples or []):
+        if not t or not t.get("a") or not t.get("b") or not t.get("eid"):
+            continue
+        a_cf = str(t["a"]).strip().casefold()
+        b_cf = str(t["b"]).strip().casefold()
+        if a_cf == b_cf:
+            continue
+        key = (a_cf, b_cf)
+        counts.setdefault(key, set()).add(str(t["eid"]))
+
+    for (a_cf, b_cf), encs in counts.items():
+        if len(encs) < _COOCCURS_MIN_ENCOUNTERS:
+            continue
+        a_id = cond_id_by_value.get(a_cf)
+        b_id = cond_id_by_value.get(b_cf)
+        if a_id and b_id and a_id != b_id:
+            edges.append({
+                "from": a_id, "to": b_id, "type": "CO_OCCURS",
+                "shared": len(encs),
+            })
 
 
 def _materialize_rows(row: dict[str, Any], *, include_encounters: bool,
@@ -549,34 +669,93 @@ def _materialize_rows(row: dict[str, Any], *, include_encounters: bool,
     def fact_eid(f: dict[str, Any]) -> str | None:
         return f.get("encounterId") if f else None
 
+    # Conditions: always anchor to the patient (or encounter when those are
+    # visible). Track value→node-id so meds/observations/plans can attach
+    # to the condition they relate to instead of all hanging off the patient.
+    cond_id_by_value: dict[str, str] = {}
+    cond_data_by_id: dict[str, dict[str, Any]] = {}
     for c in (row.get("conditions") or []):
         cid = add("Condition", c, "value", source_eid=fact_eid(c))
         if cid:
             attach_from = enc_ids.get(fact_eid(c)) if include_encounters else pid
             if attach_from:
                 edges.append({"from": attach_from, "to": cid, "type": "HAS_CONDITION"})
+            v = (c.get("value") or "").strip().casefold()
+            if v and v not in cond_id_by_value:
+                cond_id_by_value[v] = cid
+                cond_data_by_id[cid] = dict(c)
+
+    # Pre-build the TREATS / ADDRESSES lookup so meds and plans can re-route
+    # straight to their target condition. Pairs come back with a value (not
+    # an id) because Cypher's `collect(DISTINCT {…})` works on the property
+    # values; map them through the value→id index we just built.
+    treats_map: dict[str, str] = {}  # medication name (cf) → condition node id
+    for pair in (row.get("treats_pairs") or []):
+        if not pair or not pair.get("medName") or not pair.get("condValue"):
+            continue
+        cid = cond_id_by_value.get(str(pair["condValue"]).strip().casefold())
+        if cid:
+            treats_map[str(pair["medName"]).strip().casefold()] = cid
+
+    addresses_map: dict[str, str] = {}  # plan description (cf) → condition node id
+    for pair in (row.get("addresses_pairs") or []):
+        if not pair or not pair.get("planDesc") or not pair.get("condValue"):
+            continue
+        cid = cond_id_by_value.get(str(pair["condValue"]).strip().casefold())
+        if cid:
+            addresses_map[str(pair["planDesc"]).strip().casefold()] = cid
+
     for m in (row.get("medications") or []):
         mid = add("Medication", m, "name", source_eid=fact_eid(m))
-        if mid:
+        if not mid:
+            continue
+        # Prefer attaching to the treated condition; only fall back to
+        # patient / encounter when no TREATS edge exists.
+        target_cid = treats_map.get((m.get("name") or "").strip().casefold())
+        if target_cid:
+            edges.append({"from": target_cid, "to": mid, "type": "TREATED_BY"})
+        else:
             attach_from = enc_ids.get(fact_eid(m)) if include_encounters else pid
             if attach_from:
                 edges.append({"from": attach_from, "to": mid, "type": "ON_MEDICATION"})
+
     for o in (row.get("observations") or []):
         oid = add("Observation", o, "name", source_eid=fact_eid(o))
-        if oid:
+        if not oid:
+            continue
+        # Heuristic obs → condition: HbA1c probes diabetes, BP probes
+        # hypertension, etc. Falls back to patient when no match.
+        target_cid = _observation_target_condition(o, cond_id_by_value, cond_data_by_id)
+        if target_cid:
+            edges.append({"from": target_cid, "to": oid, "type": "MONITORED_BY"})
+        else:
             attach_from = enc_ids.get(fact_eid(o)) if include_encounters else pid
             if attach_from:
                 edges.append({"from": attach_from, "to": oid, "type": "HAS_OBSERVATION"})
+
     for pl in (row.get("plans") or []):
         plid = add("Plan", pl, "description", source_eid=fact_eid(pl))
-        if plid:
+        if not plid:
+            continue
+        target_cid = addresses_map.get((pl.get("description") or "").strip().casefold())
+        if target_cid:
+            edges.append({"from": target_cid, "to": plid, "type": "PLAN_FOR"})
+        else:
             attach_from = enc_ids.get(fact_eid(pl)) if include_encounters else pid
             if attach_from:
                 edges.append({"from": attach_from, "to": plid, "type": "HAS_PLAN"})
+
     for a in (row.get("allergies") or []):
         aid = add("Allergy", a, "value")
         if aid and pid:
             edges.append({"from": pid, "to": aid, "type": "HAS_ALLERGY"})
+
+    # Inter-condition co-occurrence: when two conditions are mentioned in
+    # the same encounter, draw a faint link between them. Useful for spotting
+    # comorbid clusters at a glance (e.g. diabetes + hypertension + CKD).
+    _add_cooccurrence_edges(
+        row.get("cooccurs_triples") or [], cond_id_by_value, edges,
+    )
 
     if include_documents:
         for d in (row.get("docs") or []):
