@@ -59,8 +59,13 @@
                 <!-- This-encounter facts: rendered as one v-list, mirroring
                      the Background panel on the right. FactSection emits a
                      v-list-subheader + v-list-items, so the parent v-list's
-                     native padding applies and the two columns line up. -->
-                <v-card v-if="hasThisEncounterFacts" class="mt-4">
+                     native padding applies and the two columns line up.
+                     `mt-4` only when there's a preceding card — otherwise
+                     this card would sit 16px below the Background card on
+                     the right because SummaryCard/CodingCard use v-if=value
+                     and contribute no height when empty. -->
+                <v-card v-if="hasThisEncounterFacts"
+                        :class="{ 'mt-4': summary || codingResp }">
                   <SectionHeader title="This encounter" icon="mdi-clipboard-text-outline" />
                   <v-divider />
                   <v-list density="compact">
@@ -71,7 +76,9 @@
                   </v-list>
                 </v-card>
 
-                <v-card v-if="docs.length" class="mt-4">
+                <!-- Same conditional-spacing rule as This-encounter above. -->
+                <v-card v-if="docs.length"
+                        :class="{ 'mt-4': summary || codingResp || hasThisEncounterFacts }">
                   <SectionHeader title="Documents" icon="mdi-file-multiple-outline" />
                   <v-divider />
                   <v-list density="compact" nav>
@@ -82,7 +89,7 @@
                 </v-card>
 
                 <v-alert v-if="!summary && !codingResp && !hasThisEncounterFacts && !docs.length"
-                         type="info" variant="tonal" class="mt-2">
+                         type="info" variant="tonal">
                   This encounter has no extracted facts or documents yet.
                   Click <strong>Summarize</strong> or <strong>Coding</strong> to generate output.
                 </v-alert>
