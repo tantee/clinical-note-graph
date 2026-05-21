@@ -300,18 +300,36 @@
 
       </v-window>
     </v-card>
+
+    <!-- Confirmation dialog after queueing an encounter-level Summary or
+         Coding job. Same shape as the patient-page version so users see
+         consistent copy + CTAs across both surfaces. -->
+    <JobConfirmationDialog
+      v-if="activeJob"
+      v-model="confirmDialog"
+      :jobId="activeJob.jobId"
+      :type="activeJob.type"
+      :patientId="patientId"
+      :encounterId="activeJob.encounterId"
+      :headline="activeJob.kind === 'coding' ? 'Coding queued' : 'Summary queued'"
+      body="The AI is generating this in the background. The cards in this dialog will refresh automatically when it's ready — you can keep working in another tab."
+      primaryLabel="Stay in dialog"
+      secondaryLabel="Close dialog"
+      @secondary="$emit('close')"
+    />
   </v-dialog>
 </template>
 
 <script setup>
-import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import {
   getDocument,
   getEncounterFacts,
+  getJob,
   getLatestEncounterSummary, getLatestEncounterCoding,
   getNote, getNotes,
-  summarizeEncounter, suggestEncounterCoding,
+  summarizeEncounterQueued, suggestEncounterCodingQueued,
 } from '../api/client.js'
 import { useUiStore } from '../stores/ui.js'
 import { FACT_TYPE_META } from '../constants/clinical.js'
@@ -323,6 +341,7 @@ import EmptyState from '../components/EmptyState.vue'
 import FactSection from '../components/FactSection.vue'
 import GraphView from '../components/GraphView.vue'
 import MarkdownViewer from '../components/MarkdownViewer.vue'
+import JobConfirmationDialog from '../components/JobConfirmationDialog.vue'
 
 const props = defineProps({
   patientId: { type: String, required: true },
@@ -353,6 +372,13 @@ const selectedNote = ref(null)
 
 // EMR vs facts + AI output share the same selected document
 const selectedDocument = ref(null)
+
+// Background-job watcher state, same shape as PatientDetail.vue. The
+// confirmation dialog renders from `activeJob`; the polling loop below
+// refreshes the corresponding card on completion.
+const confirmDialog = ref(false)
+const activeJob = ref(null)
+let jobWatchTimer = null
 
 const hasThisEncounterFacts = computed(() => {
   const t = thisEncounter.value
@@ -480,13 +506,20 @@ async function openDocumentAndJump(documentId) {
 async function loadSummary(type) {
   busy.summary = true
   try {
-    summary.value = await summarizeEncounter(props.patientId, props.eid, { type, includeEvidence: false })
-    ui.success('Summary ready')
-    // Reload notes so the new summary's vault file shows up under Notes.
-    const all = await getNotes(props.patientId).catch(() => null)
-    if (all) notes.value = all.files || []
+    const res = await summarizeEncounterQueued(
+      props.patientId, props.eid, { type, includeEvidence: false },
+    )
+    activeJob.value = {
+      jobId: res.jobId,
+      type: res.type,
+      kind: 'summary',
+      encounterId: props.eid,
+    }
+    confirmDialog.value = true
+    startJobWatch(res.jobId, 'summary')
+    ui.success('Summary queued — we\'ll update the dialog when ready')
   } catch {
-    ui.error('Failed to generate summary')
+    ui.error('Failed to queue summary')
   } finally {
     busy.summary = false
   }
@@ -495,17 +528,58 @@ async function loadSummary(type) {
 async function loadCoding() {
   busy.coding = true
   try {
-    codingResp.value = await suggestEncounterCoding(props.patientId, props.eid, {
-      standards: ['ICD10', 'SNOMEDCT'], includeEvidence: false,
-    })
-    ui.success('Coding suggestion ready')
-    const all = await getNotes(props.patientId).catch(() => null)
-    if (all) notes.value = all.files || []
+    const res = await suggestEncounterCodingQueued(
+      props.patientId, props.eid, { standards: ['ICD10', 'SNOMEDCT'], includeEvidence: false },
+    )
+    activeJob.value = {
+      jobId: res.jobId,
+      type: res.type,
+      kind: 'coding',
+      encounterId: props.eid,
+    }
+    confirmDialog.value = true
+    startJobWatch(res.jobId, 'coding')
+    ui.success('Coding queued — we\'ll update the dialog when ready')
   } catch {
-    ui.error('Failed to suggest coding')
+    ui.error('Failed to queue coding')
   } finally {
     busy.coding = false
   }
+}
+
+// Poll /api/jobs/{jobId} every 4 s and refresh the corresponding card
+// when the job completes. Mirrors the watcher in PatientDetail.vue —
+// see the comment block there for the rationale.
+function startJobWatch(jobId, kind) {
+  if (jobWatchTimer) clearInterval(jobWatchTimer)
+  jobWatchTimer = setInterval(async () => {
+    try {
+      const j = await getJob(jobId)
+      if (j.status === 'completed') {
+        clearInterval(jobWatchTimer)
+        jobWatchTimer = null
+        activeJob.value = null
+        if (kind === 'summary') {
+          summary.value = await getLatestEncounterSummary(props.patientId, props.eid)
+          ui.success('Summary ready')
+        } else if (kind === 'coding') {
+          const cod = await getLatestEncounterCoding(props.patientId, props.eid)
+          codingResp.value = cod?.payload || cod || null
+          ui.success('Coding ready')
+        }
+        // Notes folder may have picked up the new vault file — refresh.
+        const all = await getNotes(props.patientId).catch(() => null)
+        if (all) notes.value = all.files || []
+      } else if (j.status === 'failed') {
+        clearInterval(jobWatchTimer)
+        jobWatchTimer = null
+        activeJob.value = null
+        ui.error(`${kind} job failed — check Debug → AI calls.`)
+      }
+    } catch {
+      // Single missed poll is fine; keep trying.
+    }
+  }, 4_000)
 }
 
 onMounted(async () => {
@@ -518,4 +592,8 @@ onMounted(async () => {
 })
 
 watch(() => props.eid, fetchAll)
+
+onBeforeUnmount(() => {
+  if (jobWatchTimer) clearInterval(jobWatchTimer)
+})
 </script>

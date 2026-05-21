@@ -17,9 +17,34 @@
       </div>
       <v-spacer />
       <v-btn class="mr-2" variant="text" prepend-icon="mdi-note-plus-outline" :to="{ name: 'ingest', query: { patientId: id } }">Add note</v-btn>
-      <v-btn class="mr-2" color="primary" variant="tonal" prepend-icon="mdi-text-box-outline" :loading="busy.summary" @click="loadSummary">
-        {{ summary ? 'Regenerate summary' : 'Summary' }}
-      </v-btn>
+      <!-- Summary button mirrors the encounter dialog: dropdown picks the
+           summary type, then queues the AI job and watches it in the
+           background. Picking from the menu replaces the old single-action
+           click so the user can pick discharge / detailed / brief etc.
+           without leaving the page. -->
+      <v-menu>
+        <template #activator="{ props: a }">
+          <v-btn v-bind="a" class="mr-2" color="primary" variant="tonal"
+                 prepend-icon="mdi-text-box-outline" :loading="busy.summary">
+            {{ summary ? 'Regenerate summary' : 'Summarize' }}
+            <v-icon end>mdi-chevron-down</v-icon>
+          </v-btn>
+        </template>
+        <v-list density="compact">
+          <v-list-item title="Detailed" prepend-icon="mdi-text"
+                       @click="loadSummary('detailed')" />
+          <v-list-item title="Brief" prepend-icon="mdi-text-short"
+                       @click="loadSummary('brief')" />
+          <v-list-item title="Discharge" prepend-icon="mdi-hospital-box-outline"
+                       @click="loadSummary('discharge')" />
+          <v-list-item title="Problem-oriented" prepend-icon="mdi-format-list-bulleted-square"
+                       @click="loadSummary('problem_oriented')" />
+          <v-list-item title="Timeline" prepend-icon="mdi-timeline-text-outline"
+                       @click="loadSummary('timeline')" />
+          <v-list-item title="Coding support" prepend-icon="mdi-tag-text-outline"
+                       @click="loadSummary('coding_support')" />
+        </v-list>
+      </v-menu>
       <v-btn color="primary" variant="tonal" prepend-icon="mdi-tag-text-outline" :loading="busy.coding" @click="loadCoding">
         {{ codingResp ? 'Regenerate coding' : 'Coding' }}
       </v-btn>
@@ -492,10 +517,10 @@ async function recoverFromAiFailure(loader, name) {
 // saved result when the job completes — so the user can switch tabs
 // without losing the result. The sync helpers (summarize / suggestCoding)
 // stay imported for scripted callers / the encounter dialog's fallback.
-async function loadSummary() {
+async function loadSummary(type = 'detailed') {
   busy.summary = true
   try {
-    const res = await summarizeQueued(props.id, { type: 'detailed', includeEvidence: true })
+    const res = await summarizeQueued(props.id, { type, includeEvidence: true })
     activeJob.value = { jobId: res.jobId, type: res.type, kind: 'summary' }
     confirmDialog.value = true
     startJobWatch(res.jobId, 'summary')
