@@ -88,6 +88,34 @@ RUN python -m spacy download en_core_web_lg
 
 …then set `DEIDENT_SPACY_MODEL=en_core_web_lg` in `.env`.
 
+## "Prod proxy returns 502 — dial tcp: lookup frontend on 127.0.0.11:53"
+
+Exact log shape:
+
+```
+ERROR  http.log.error.log0  dial tcp: lookup frontend on 127.0.0.11:53: server misbehaving
+                            …status=502, err_trace=reverseproxy.statusError…
+```
+
+The prod proxy is still loading the dev `Caddyfile.dev` (which reverse-proxies to `frontend:5173`) instead of `Caddyfile.prod` (which serves static files). The dev container is disabled in prod via `profiles: ["never"]`, so the `frontend` hostname doesn't resolve → 502.
+
+**Root cause**: pre-fix, `docker-compose.prod.yml`'s proxy block didn't reset the `volumes:` list. Compose merges lists by default, so the dev compose's bind mount
+
+```yaml
+- ./caddy/Caddyfile.dev:/etc/caddy/Caddyfile:ro
+```
+
+survived the merge and shadowed the `Caddyfile.prod` baked into the image.
+
+**Fix**: pull the latest, rebuild, and bring the proxy back up:
+
+```bash
+git pull
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build proxy
+```
+
+To confirm after the fix: `docker compose exec proxy cat /etc/caddy/Caddyfile | head -5` should show `# Caddy: production reverse proxy and static-file server.` from `Caddyfile.prod`, not `# Caddy: dev reverse proxy.` from `Caddyfile.dev`.
+
 ## "Blocked request. This host (...) is not allowed."
 
 You're hitting the Vite dev server (`docker compose up`) via a hostname other than `localhost`. Vite 5+ rejects non-allowlisted host headers by default.
