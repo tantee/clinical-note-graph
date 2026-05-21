@@ -108,42 +108,54 @@
           </div>
         </v-window-item>
 
-        <!-- Timeline — at encounter scope the timeline collapses to the
-             source documents attached to this admission/visit. One card
-             per document with format, version, source system, and a
-             relative timestamp. -->
+        <!-- Timeline — at encounter scope this is the chronological list of
+             documents on this admission/visit, rendered with the same
+             v-timeline vertical-rail pattern the patient page uses for
+             encounters (but one level deeper: patient → encounters,
+             encounter → documents). -->
         <v-window-item value="timeline">
           <div class="pa-4">
             <v-card>
-              <SectionHeader title="Documents on this encounter" icon="mdi-file-multiple-outline">
+              <SectionHeader title="Documents on this encounter" icon="mdi-timeline-clock-outline">
                 <template #actions>
                   <v-chip v-if="docs.length" size="x-small" variant="tonal">{{ docs.length }}</v-chip>
                 </template>
               </SectionHeader>
               <v-divider />
-              <v-list density="comfortable">
-                <v-list-item
-                  v-for="d in docs"
-                  :key="d.documentId"
-                  :title="d.documentId"
-                  @click="openDocumentAndJump(d.documentId)"
-                >
-                  <template #prepend>
-                    <v-icon color="primary">mdi-file-document-outline</v-icon>
-                  </template>
-                  <v-list-item-subtitle>
-                    <v-chip size="x-small" class="mr-2" variant="tonal">{{ d.format || '?' }}</v-chip>
-                    <span v-if="d.version">v{{ d.version }}</span>
-                    <span v-if="d.encounterId" class="text-grey-darken-1 ml-2">· {{ d.encounterId }}</span>
-                  </v-list-item-subtitle>
-                  <template #append>
-                    <v-icon size="small" color="grey">mdi-arrow-right</v-icon>
-                  </template>
-                </v-list-item>
-                <EmptyState v-if="!docs.length"
+              <v-card-text>
+                <v-timeline v-if="docs.length" density="comfortable" side="end" align="start">
+                  <v-timeline-item
+                    v-for="d in sortedDocs"
+                    :key="d.documentId"
+                    dot-color="primary"
+                    icon="mdi-file-document-outline"
+                    size="small"
+                  >
+                    <template #opposite>
+                      <div class="text-body-2">{{ d.receivedAt ? formatDate(d.receivedAt) : '—' }}</div>
+                      <div class="text-caption text-grey">
+                        {{ d.receivedAt ? formatRelative(d.receivedAt) : '' }}
+                      </div>
+                    </template>
+                    <v-card variant="outlined" class="cursor-pointer"
+                            @click="openDocumentAndJump(d.documentId)">
+                      <v-card-text class="py-3">
+                        <div class="d-flex align-center mb-1">
+                          <span class="text-subtitle-2 mr-2 text-truncate">{{ d.documentId }}</span>
+                          <v-chip size="x-small" variant="tonal">{{ d.format || '?' }}</v-chip>
+                          <v-chip v-if="d.version" size="x-small" variant="tonal" class="ml-1">v{{ d.version }}</v-chip>
+                        </div>
+                        <div v-if="d.sourceSystem" class="text-caption text-grey-darken-1">
+                          {{ d.sourceSystem }}
+                        </div>
+                      </v-card-text>
+                    </v-card>
+                  </v-timeline-item>
+                </v-timeline>
+                <EmptyState v-else
                             icon="mdi-file-question-outline"
                             title="No documents on this encounter" />
-              </v-list>
+              </v-card-text>
             </v-card>
           </div>
         </v-window-item>
@@ -170,8 +182,8 @@
                     />
                     <EmptyState v-if="!encounterNotes.length"
                                 icon="mdi-folder-open-outline"
-                                title="No notes yet"
-                                hint="Generate Summary or Coding to populate." />
+                                title="No notes for this encounter yet"
+                                hint="Run Summarize or Coding from the toolbar above to generate one." />
                   </v-list>
                 </v-card>
               </v-col>
@@ -183,9 +195,14 @@
                   :backlinks="selectedNote.backlinks"
                   @open="openNote"
                 />
-                <v-alert v-else type="info" variant="tonal">
-                  Select a file from the list.
-                </v-alert>
+                <EmptyState v-else-if="encounterNotes.length"
+                            icon="mdi-file-document-outline"
+                            title="Pick a file"
+                            hint="Select a file from the list on the left." />
+                <EmptyState v-else
+                            icon="mdi-folder-open-outline"
+                            title="Nothing to show"
+                            hint="This encounter has no vault notes yet." />
               </v-col>
             </v-row>
           </div>
@@ -298,6 +315,7 @@ import {
 } from '../api/client.js'
 import { useUiStore } from '../stores/ui.js'
 import { FACT_TYPE_META } from '../constants/clinical.js'
+import { formatDate, formatRelative } from '../utils/format.js'
 import SummaryCard from '../components/SummaryCard.vue'
 import CodingCard from '../components/CodingCard.vue'
 import SectionHeader from '../components/SectionHeader.vue'
@@ -343,6 +361,17 @@ const hasThisEncounterFacts = computed(() => {
     t.procedures.length || t.plans.length || t.diagnoses.length
   )
 })
+
+// Documents in chronological order for the Timeline tab. Falls back to
+// the natural order from gather_encounter_facts when receivedAt is null
+// (older rows without timestamps).
+const sortedDocs = computed(() =>
+  (docs.value || []).slice().sort((a, b) => {
+    const ta = a.receivedAt ? new Date(a.receivedAt).getTime() : 0
+    const tb = b.receivedAt ? new Date(b.receivedAt).getTime() : 0
+    return ta - tb
+  }),
+)
 
 const thisEncounterGroups = computed(() => {
   const t = thisEncounter.value
