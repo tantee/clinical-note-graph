@@ -1,30 +1,34 @@
 <template>
-  <div class="mb-3">
-    <div class="d-flex align-center mb-1">
-      <v-icon v-if="icon" size="18" class="mr-2" color="grey-darken-1">{{ icon }}</v-icon>
-      <div class="text-subtitle-2">{{ title }}</div>
-      <v-chip size="x-small" class="ml-2" variant="tonal">{{ items.length }}</v-chip>
-    </div>
-    <v-list density="compact" class="py-0">
-      <v-list-item v-for="(it, i) in items" :key="it.id || `${title}-${i}`" class="px-2">
-        <v-list-item-title class="text-body-2">
-          {{ it.value || it.name || '(unnamed)' }}
-          <span v-if="it.normalized_code" class="text-caption text-grey-darken-1 ml-1">
-            · {{ it.normalized_code }}
-          </span>
-        </v-list-item-title>
-        <v-list-item-subtitle v-if="subtitleFor(it)">{{ subtitleFor(it) }}</v-list-item-subtitle>
-      </v-list-item>
-    </v-list>
-  </div>
+  <!-- Renders as a fragment of v-list-subheader + v-list-items so the parent
+       <v-list> owns the alignment. The Background panel on the right side of
+       EncounterDialog uses the same pattern, so both columns share native
+       Vuetify list padding instead of fighting it. -->
+  <v-list-subheader>
+    {{ title }}
+    <span class="text-grey-darken-1 ml-2">({{ items.length }})</span>
+  </v-list-subheader>
+  <v-list-item
+    v-for="(it, i) in items"
+    :key="it.id || `${title}-${i}`"
+    :title="titleFor(it)"
+    :subtitle="subtitleFor(it)"
+  />
 </template>
 
 <script setup>
 defineProps({
   title: { type: String, required: true },
+  // Kept for backwards compatibility — subheader has no icon slot, so we
+  // intentionally don't render it. Accept the prop so existing call sites
+  // don't trigger a prop-type warning.
   icon: { type: String, default: '' },
   items: { type: Array, required: true },
 })
+
+function titleFor(it) {
+  const base = it.value || it.name || '(unnamed)'
+  return it.normalized_code ? `${base} · ${it.normalized_code}` : base
+}
 
 function subtitleFor(it) {
   const extra = it.extra || {}

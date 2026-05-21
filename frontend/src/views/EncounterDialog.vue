@@ -56,36 +56,19 @@
                 <SummaryCard :value="summary" />
                 <CodingCard :value="codingResp" />
 
-                <!-- This-encounter facts: rendered straight from
-                     gather_encounter_facts so the left column is populated
-                     before the user generates a summary / coding. Each
-                     bucket only appears when it has rows; the whole card
-                     collapses if the encounter has no extracted facts
-                     (which is the case for encounters whose source document
-                     hasn't been re-extracted yet). -->
+                <!-- This-encounter facts: rendered as one v-list, mirroring
+                     the Background panel on the right. FactSection emits a
+                     v-list-subheader + v-list-items, so the parent v-list's
+                     native padding applies and the two columns line up. -->
                 <v-card v-if="hasThisEncounterFacts" class="mt-4">
                   <SectionHeader title="This encounter" icon="mdi-clipboard-text-outline" />
                   <v-divider />
-                  <v-card-text>
-                    <FactSection v-if="thisEncounter.problems.length"
-                                 title="Problems" icon="mdi-medical-bag"
-                                 :items="thisEncounter.problems" />
-                    <FactSection v-if="thisEncounter.medications.length"
-                                 title="Medications" icon="mdi-pill"
-                                 :items="thisEncounter.medications" />
-                    <FactSection v-if="thisEncounter.observations.length"
-                                 title="Observations" icon="mdi-test-tube"
-                                 :items="thisEncounter.observations" />
-                    <FactSection v-if="thisEncounter.procedures.length"
-                                 title="Procedures" icon="mdi-scalpel"
-                                 :items="thisEncounter.procedures" />
-                    <FactSection v-if="thisEncounter.plans.length"
-                                 title="Plan" icon="mdi-clipboard-check-outline"
-                                 :items="thisEncounter.plans" />
-                    <FactSection v-if="thisEncounter.diagnoses.length"
-                                 title="Diagnoses" icon="mdi-stethoscope"
-                                 :items="thisEncounter.diagnoses" />
-                  </v-card-text>
+                  <v-list density="compact">
+                    <template v-for="(group, idx) in thisEncounterGroups" :key="group.title">
+                      <v-divider v-if="idx > 0" class="my-1" />
+                      <FactSection :title="group.title" :items="group.items" />
+                    </template>
+                  </v-list>
                 </v-card>
 
                 <v-card v-if="docs.length" class="mt-4">
@@ -180,6 +163,22 @@ const hasThisEncounterFacts = computed(() => {
     t.problems.length || t.medications.length || t.observations.length ||
     t.procedures.length || t.plans.length || t.diagnoses.length
   )
+})
+
+// Drive the template loop from data so the dividers between groups are
+// rendered between (not after) each section. Order matches the clinical
+// reading flow: problems first, then meds, then numeric findings, then
+// procedures, plans, and finally any extra diagnosis candidates.
+const thisEncounterGroups = computed(() => {
+  const t = thisEncounter.value
+  return [
+    { title: 'Problems',     items: t.problems },
+    { title: 'Medications',  items: t.medications },
+    { title: 'Observations', items: t.observations },
+    { title: 'Procedures',   items: t.procedures },
+    { title: 'Plan',         items: t.plans },
+    { title: 'Diagnoses',    items: t.diagnoses },
+  ].filter((g) => g.items.length)
 })
 
 async function fetchAll() {
