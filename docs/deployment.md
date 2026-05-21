@@ -73,7 +73,10 @@ Three places work, in increasing persistence:
 
 1. **`PATCH /api/config`** (or the `/#/config` UI) — overrides land in the `app_config` table and merge into `Settings` on every read. No restart. Survives container restart but not `down -v`.
 2. **`.env`** — set the vars and `docker compose up`. Persistent across `down -v` because `.env` lives in your working tree.
-3. **Quick-start preset** — copy one of `.env.option.{deepseek,gemini,hybrid}` into `.env` for a known-good stack. See [docs/ai-providers.md](ai-providers.md).
+3. **Quick-start preset** — copy one of the `.env.option.*` files into `.env` for a known-good stack:
+   - `deepseek` / `gemini` / `hybrid` — AI provider presets, see [docs/ai-providers.md](ai-providers.md)
+   - `debug` — maximum-verbosity layer (DEBUG logging, de-id off, queue inline). Use when diagnosing a tricky bug. **Synthetic data only.**
+   - `prod-behind-proxy` — production with HTTP-only Caddy and no hostname (when an upstream proxy terminates HTTPS). See [TLS modes](#tls-modes).
 
 Persistent DB overrides (path 1) win over `.env` (path 2). Effective settings are visible at `GET /api/config` with secrets masked.
 
