@@ -13,6 +13,14 @@ export default defineConfig(({ mode }) => {
       host: '0.0.0.0',
       port: 5173,
       watch: { usePolling: true },
+      // Vite 5+ rejects host headers other than localhost by default. In
+      // this stack Caddy is always the public entry point, so the dev
+      // server is only ever reached via the proxy — accept any host. If
+      // you want to restrict, set VITE_ALLOWED_HOSTS to a comma-separated
+      // list (`example.com,foo.example.com`) and we honour that instead.
+      allowedHosts: process.env.VITE_ALLOWED_HOSTS
+        ? process.env.VITE_ALLOWED_HOSTS.split(',').map((s) => s.trim()).filter(Boolean)
+        : 'all',
     },
     test: {
       environment: 'jsdom',
