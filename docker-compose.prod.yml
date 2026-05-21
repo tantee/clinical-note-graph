@@ -64,7 +64,12 @@ services:
       CADDY_EMAIL: ${CADDY_EMAIL:-admin@example.com}
       CNG_TRUSTED_PROXIES: ${CNG_TRUSTED_PROXIES:-private_ranges}
       CNG_HSTS: ${CNG_HSTS:-max-age=31536000; includeSubDomains}
-    volumes:
+    # !override on volumes (NOT append) so dev's
+    # `./caddy/Caddyfile.dev:/etc/caddy/Caddyfile:ro` bind mount doesn't
+    # survive the compose merge and shadow the Caddyfile.prod baked into
+    # the image. Without this the proxy keeps trying to reverse-proxy
+    # `frontend:5173` (which is disabled in prod) → 502 dial-tcp errors.
+    volumes: !override
       - caddydata:/data
       - caddyconfig:/config
     ports: !override
