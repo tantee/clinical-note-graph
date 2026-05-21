@@ -1,16 +1,38 @@
 # Caddy: production reverse proxy and static-file server.
 #
-# Set CNG_DOMAIN to a real public hostname (e.g. cng.example.com) and Caddy
-# will auto-fetch a Let's Encrypt certificate via the ACME HTTP-01 challenge —
-# ports 80 and 443 must be reachable from the public Internet.
-# Set CADDY_EMAIL for renewal notifications. If CNG_DOMAIN is "localhost" or
-# an IP, Caddy serves plain HTTP only.
+# Two deployment shapes — picked by what you put in CNG_DOMAIN:
+#
+# 1) Direct-to-internet (default): Caddy is the public entry point.
+#       CNG_DOMAIN=cng.example.com   (real, publicly resolvable hostname)
+#       CADDY_EMAIL=ops@example.com  (Let's Encrypt notifications)
+#    Caddy auto-fetches a Let's Encrypt certificate via ACME HTTP-01.
+#    Ports 80 + 443 must be reachable from the public Internet.
+#
+# 2) Behind another reverse proxy (nginx, Traefik, ELB, Cloudflare tunnel…):
+#       CNG_DOMAIN=:80                (port-only bind, no TLS, no ACME)
+#    Caddy serves plain HTTP on :80. Trusted upstream X-Forwarded-* headers
+#    flow through to the backend so the app sees the real scheme/host.
+#    Your upstream proxy handles HTTPS / certs / WAF.
+#
+# Setting CNG_DOMAIN to "localhost" or an IP also serves plain HTTP — same
+# behaviour as case 2, just less explicit.
 
 {
     email {$CADDY_EMAIL:admin@example.com}
     admin off
+    # Trust X-Forwarded-* headers from upstream proxies. CNG_TRUSTED_PROXIES
+    # defaults to "private_ranges" which covers the typical case (docker
+    # bridge, k8s pods, RFC1918 CIDRs). Override if your upstream lives
+    # outside private space.
+    servers {
+        trusted_proxies static {$CNG_TRUSTED_PROXIES:private_ranges}
+    }
 }
 
+# CNG_DOMAIN can be either a real hostname (auto-TLS) or a port-only bind
+# like ":80" (plain HTTP — Caddy doesn't provision certs for port-only
+# addresses, which is exactly what we want when an upstream is terminating
+# TLS).
 {$CNG_DOMAIN:localhost} {
     encode gzip zstd
 
@@ -19,8 +41,11 @@
     }
     handle @backend {
         reverse_proxy backend:8000 {
-            header_up X-Forwarded-Proto {scheme}
-            header_up X-Forwarded-Host {host}
+            # When behind another proxy the upstream already populated
+            # X-Forwarded-Proto / X-Forwarded-Host; pass those through if
+            # present, otherwise fall back to what Caddy itself saw.
+            header_up X-Forwarded-Proto {http.request.header.X-Forwarded-Proto:{http.request.scheme}}
+            header_up X-Forwarded-Host {http.request.header.X-Forwarded-Host:{host}}
         }
     }
 
@@ -37,7 +62,13 @@
         X-Frame-Options "SAMEORIGIN"
         X-Content-Type-Options "nosniff"
         Referrer-Policy "strict-origin-when-cross-origin"
-        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        # HSTS only makes sense when *we* are the TLS endpoint. When TLS is
+        # terminated upstream the public client may still be on HTTP, so
+        # advertising HSTS from here would be wrong / a footgun. Override
+        # CNG_HSTS to "no" in behind-proxy mode if your upstream isn't
+        # already setting it (the default leaves the header in for direct
+        # TLS deployments to preserve existing behavior).
+        Strict-Transport-Security {$CNG_HSTS:"max-age=31536000; includeSubDomains"}
     }
 
     log {
