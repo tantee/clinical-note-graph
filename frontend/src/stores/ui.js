@@ -17,7 +17,10 @@ export const useUiStore = defineStore('ui', {
       this.snackbar = { show: true, message, color, timeout }
     },
     success(msg) { this.notify(msg, 'success') },
-    error(msg) { this.notify(msg, 'error', 6000) },
+    // Accept an optional `{ timeout }` override so action-oriented
+    // toasts (e.g. "set your X-API-Key in Config →…") can stay visible
+    // long enough to read.
+    error(msg, opts = {}) { this.notify(msg, 'error', opts.timeout ?? 6000) },
     warning(msg) { this.notify(msg, 'warning') },
     dismiss() { this.snackbar.show = false },
   },

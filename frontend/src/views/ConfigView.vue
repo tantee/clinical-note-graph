@@ -174,7 +174,10 @@
 
 <script setup>
 import { computed, onMounted, ref } from 'vue'
-import { getConfig, patchConfig, listExportProfiles, upsertExportProfile } from '../api/client.js'
+import {
+  getConfig, patchConfig, listExportProfiles, upsertExportProfile,
+  resetApiKeyPromptShown,
+} from '../api/client.js'
 import { useUiStore } from '../stores/ui.js'
 import SectionHeader from '../components/SectionHeader.vue'
 import EmptyState from '../components/EmptyState.vue'
@@ -209,26 +212,39 @@ const selectedConfigStr = computed({
 })
 
 async function load() {
-  const cfg = await getConfig()
-  current.value = cfg
-  // Only seed the patch with non-secret fields. AI_API_KEY is intentionally left empty
-  // (the masked value is shown as placeholder; empty submission means "leave unchanged").
-  patch.value = {
-    AI_PROVIDER: cfg.settings.AI_PROVIDER,
-    AI_BASE_URL: cfg.settings.AI_BASE_URL,
-    AI_API_KEY: '',
-    AI_MODEL: cfg.settings.AI_MODEL,
-    AI_MODEL_EXTRACT: cfg.settings.AI_MODEL_EXTRACT || '',
-    AI_MODEL_SUMMARY: cfg.settings.AI_MODEL_SUMMARY || '',
-    AI_MODEL_CODING: cfg.settings.AI_MODEL_CODING || '',
-    AI_EMBEDDING_MODEL: cfg.settings.AI_EMBEDDING_MODEL,
-    VAULT_PATH: cfg.settings.VAULT_PATH,
-    CODING_ICD10: cfg.settings.CODING_ICD10,
-    CODING_SNOMEDCT: cfg.settings.CODING_SNOMEDCT,
-    CODING_LOINC: cfg.settings.CODING_LOINC,
-    CODING_RXNORM: cfg.settings.CODING_RXNORM,
+  // Both /api/config and /api/config/export-profiles sit behind the
+  // X-API-Key gate in prod. Wrap each call so a 401 (or any failure)
+  // doesn't crash the page — the Browser API key card below still has
+  // to render so the user can paste their key and unlock the rest.
+  try {
+    const cfg = await getConfig()
+    current.value = cfg
+    // Only seed the patch with non-secret fields. AI_API_KEY is intentionally left empty
+    // (the masked value is shown as placeholder; empty submission means "leave unchanged").
+    patch.value = {
+      AI_PROVIDER: cfg.settings.AI_PROVIDER,
+      AI_BASE_URL: cfg.settings.AI_BASE_URL,
+      AI_API_KEY: '',
+      AI_MODEL: cfg.settings.AI_MODEL,
+      AI_MODEL_EXTRACT: cfg.settings.AI_MODEL_EXTRACT || '',
+      AI_MODEL_SUMMARY: cfg.settings.AI_MODEL_SUMMARY || '',
+      AI_MODEL_CODING: cfg.settings.AI_MODEL_CODING || '',
+      AI_EMBEDDING_MODEL: cfg.settings.AI_EMBEDDING_MODEL,
+      VAULT_PATH: cfg.settings.VAULT_PATH,
+      CODING_ICD10: cfg.settings.CODING_ICD10,
+      CODING_SNOMEDCT: cfg.settings.CODING_SNOMEDCT,
+      CODING_LOINC: cfg.settings.CODING_LOINC,
+      CODING_RXNORM: cfg.settings.CODING_RXNORM,
+    }
+  } catch {
+    // Leave current.value / patch.value at their initial empty shapes.
+    // The global axios error handler already surfaced a snackbar.
   }
-  profiles.value = await listExportProfiles()
+  try {
+    profiles.value = await listExportProfiles()
+  } catch {
+    profiles.value = []
+  }
 }
 async function save() {
   saving.value = true
@@ -281,6 +297,10 @@ async function saveProfile() {
 function saveBrowserKey() {
   if (browserKey.value) localStorage.setItem('cng_api_key', browserKey.value)
   else localStorage.removeItem('cng_api_key')
+  // Re-arm the once-per-session "missing X-API-Key" toast so the user
+  // gets a fresh warning if a future request still 401s (typo, wrong
+  // backend, etc).
+  resetApiKeyPromptShown()
   ui.success('Browser API key saved.')
 }
 function clearBrowserKey() {

@@ -116,6 +116,27 @@ docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build pr
 
 To confirm after the fix: `docker compose exec proxy cat /etc/caddy/Caddyfile | head -5` should show `# Caddy: production reverse proxy and static-file server.` from `Caddyfile.prod`, not `# Caddy: dev reverse proxy.` from `Caddyfile.dev`.
 
+## "Invalid or missing X-API-Key" after first prod deploy
+
+Symptom: a snackbar fires saying *"Invalid or missing X-API-Key"* and every protected request (`/api/emr`, `/api/config`, `/api/export`, `/api/facts`, `/api/debug`) returns 401.
+
+The backend has `BACKEND_API_KEY` set in `.env` (correct, required in prod). The browser doesn't know the matching value yet — it lives only in the user's `localStorage` and a fresh browser session has none.
+
+**Fix**:
+
+1. Open the app and go to **Config** (top-nav, no API key required to load the page itself).
+2. Scroll to the **Browser API key** card.
+3. Paste your `BACKEND_API_KEY` value from `.env` into the *X-API-Key (browser-side)* field.
+4. Click **Save in this browser**.
+5. Refresh — protected endpoints now succeed.
+
+The latest frontend code:
+- The snackbar text now spells out *where* to set the key (Config → Browser API key) instead of just echoing the backend's terse error.
+- The Config page renders even when `GET /api/config` 401s, so the Browser API key card is always reachable.
+- The "missing X-API-Key" toast fires once per session (not once per failed request) so the first paint doesn't spam.
+
+If pasting the key still 401s, double-check it matches `BACKEND_API_KEY` in `.env` byte-for-byte (no trailing whitespace, no quotes).
+
 ## "Blocked request. This host (...) is not allowed."
 
 You're hitting the Vite dev server (`docker compose up`) via a hostname other than `localhost`. Vite 5+ rejects non-allowlisted host headers by default.
