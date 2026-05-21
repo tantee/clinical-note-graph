@@ -83,6 +83,14 @@ export const getEncounterDocuments = (id, encounterId, signal) =>
   api
     .get(`/api/patient/${encodeURIComponent(id)}/encounter/${encodeURIComponent(encounterId)}/documents`, { signal })
     .then(data)
+// Single round-trip that powers the encounter dialog's Detail tab —
+// returns {encounter, thisEncounter, background, documents}. Before this
+// existed the dialog only fetched the encounter-level summary and rendered
+// a fully-empty pane when the user hadn't generated one yet.
+export const getEncounterFacts = (id, encounterId, signal) =>
+  api
+    .get(`/api/patient/${encodeURIComponent(id)}/encounter/${encodeURIComponent(encounterId)}/facts`, { signal })
+    .then(data)
 export const getDocument = (id, docId, signal) =>
   api.get(`/api/patient/${encodeURIComponent(id)}/document/${encodeURIComponent(docId)}`, { signal }).then(data)
 export const ingest = (body) => api.post('/api/emr/ingest', body).then(data)

@@ -55,7 +55,30 @@
               <v-col cols="12" md="8">
                 <SummaryCard :value="summary" />
                 <CodingCard :value="codingResp" />
-                <v-card v-if="docs.length" class="mt-4">
+
+                <!-- This-encounter facts: rendered as one v-list, mirroring
+                     the Background panel on the right. FactSection emits a
+                     v-list-subheader + v-list-items, so the parent v-list's
+                     native padding applies and the two columns line up.
+                     `mt-4` only when there's a preceding card — otherwise
+                     this card would sit 16px below the Background card on
+                     the right because SummaryCard/CodingCard use v-if=value
+                     and contribute no height when empty. -->
+                <v-card v-if="hasThisEncounterFacts"
+                        :class="{ 'mt-4': summary || codingResp }">
+                  <SectionHeader title="This encounter" icon="mdi-clipboard-text-outline" />
+                  <v-divider />
+                  <v-list density="compact">
+                    <template v-for="(group, idx) in thisEncounterGroups" :key="group.title">
+                      <v-divider v-if="idx > 0" class="my-1" />
+                      <FactSection :title="group.title" :items="group.items" />
+                    </template>
+                  </v-list>
+                </v-card>
+
+                <!-- Same conditional-spacing rule as This-encounter above. -->
+                <v-card v-if="docs.length"
+                        :class="{ 'mt-4': summary || codingResp || hasThisEncounterFacts }">
                   <SectionHeader title="Documents" icon="mdi-file-multiple-outline" />
                   <v-divider />
                   <v-list density="compact" nav>
@@ -64,6 +87,12 @@
                                  :subtitle="`v${d.version} · ${d.format}`" />
                   </v-list>
                 </v-card>
+
+                <v-alert v-if="!summary && !codingResp && !hasThisEncounterFacts && !docs.length"
+                         type="info" variant="tonal">
+                  This encounter has no extracted facts or documents yet.
+                  Click <strong>Summarize</strong> or <strong>Coding</strong> to generate output.
+                </v-alert>
               </v-col>
               <v-col cols="12" md="4">
                 <v-card>
@@ -97,17 +126,19 @@
 </template>
 
 <script setup>
-import { onMounted, reactive, ref, watch } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import {
+  getEncounterFacts,
   getLatestEncounterSummary, getLatestEncounterCoding,
-  summarizeEncounter, suggestEncounterCoding, listEncounters,
+  summarizeEncounter, suggestEncounterCoding,
 } from '../api/client.js'
 import { useUiStore } from '../stores/ui.js'
 import SummaryCard from '../components/SummaryCard.vue'
 import CodingCard from '../components/CodingCard.vue'
 import SectionHeader from '../components/SectionHeader.vue'
 import EmptyState from '../components/EmptyState.vue'
+import FactSection from '../components/FactSection.vue'
 import GraphView from '../components/GraphView.vue'
 
 const props = defineProps({
@@ -124,40 +155,77 @@ const loading = ref(true)
 const error = ref('')
 const encounter = ref(null)
 const background = ref({ chronicProblems: [], homeMedications: [], knownAllergies: [] })
+const thisEncounter = ref({
+  problems: [], medications: [], observations: [], procedures: [],
+  plans: [], allergies: [], diagnoses: [], codingCandidates: [],
+})
 const docs = ref([])
 const summary = ref(null)
 const codingResp = ref(null)
 const busy = reactive({ summary: false, coding: false })
 
-function extractBackground(evidence) {
-  if (!evidence || typeof evidence !== 'object' || !evidence.background) {
-    return { chronicProblems: [], homeMedications: [], knownAllergies: [] }
-  }
-  return {
-    chronicProblems: evidence.background.chronicProblems || [],
-    homeMedications: evidence.background.homeMedications || [],
-    knownAllergies: evidence.background.knownAllergies || [],
-  }
-}
+const hasThisEncounterFacts = computed(() => {
+  const t = thisEncounter.value
+  return (
+    t.problems.length || t.medications.length || t.observations.length ||
+    t.procedures.length || t.plans.length || t.diagnoses.length
+  )
+})
+
+// Drive the template loop from data so the dividers between groups are
+// rendered between (not after) each section. Order matches the clinical
+// reading flow: problems first, then meds, then numeric findings, then
+// procedures, plans, and finally any extra diagnosis candidates.
+const thisEncounterGroups = computed(() => {
+  const t = thisEncounter.value
+  return [
+    { title: 'Problems',     items: t.problems },
+    { title: 'Medications',  items: t.medications },
+    { title: 'Observations', items: t.observations },
+    { title: 'Procedures',   items: t.procedures },
+    { title: 'Plan',         items: t.plans },
+    { title: 'Diagnoses',    items: t.diagnoses },
+  ].filter((g) => g.items.length)
+})
 
 async function fetchAll() {
   loading.value = true
   error.value = ''
   try {
-    const [sum, cod, list] = await Promise.all([
+    // gather_encounter_facts is the single source of truth for the dialog
+    // header (encounter metadata), the left-column facts, the right-column
+    // background, AND the documents list. Older code split this across
+    // three endpoints and silently rendered a blank pane when none of them
+    // returned anything — see bug fix in fix/encounter-dialog-blank.
+    const [facts, sum, cod] = await Promise.all([
+      getEncounterFacts(props.patientId, props.eid).catch((e) => {
+        if (e?.response?.status === 404) error.value = 'Encounter not found for this patient.'
+        return null
+      }),
       getLatestEncounterSummary(props.patientId, props.eid).catch(() => null),
       getLatestEncounterCoding(props.patientId, props.eid).catch(() => null),
-      listEncounters(props.patientId).catch(() => []),
     ])
+    if (facts) {
+      encounter.value = facts.encounter || null
+      thisEncounter.value = {
+        problems:         facts.thisEncounter?.problems || [],
+        medications:      facts.thisEncounter?.medications || [],
+        observations:     facts.thisEncounter?.observations || [],
+        procedures:       facts.thisEncounter?.procedures || [],
+        plans:            facts.thisEncounter?.plans || [],
+        allergies:        facts.thisEncounter?.allergies || [],
+        diagnoses:        facts.thisEncounter?.diagnoses || [],
+        codingCandidates: facts.thisEncounter?.codingCandidates || [],
+      }
+      background.value = {
+        chronicProblems: facts.background?.chronicProblems || [],
+        homeMedications: facts.background?.homeMedications || [],
+        knownAllergies:  facts.background?.knownAllergies || [],
+      }
+      docs.value = facts.documents || []
+    }
     summary.value = sum
     codingResp.value = cod?.payload || cod || null
-    background.value = extractBackground(sum?.evidence)
-    const match = (list || []).find((e) => e.encounterId === props.eid)
-    if (!match) {
-      error.value = 'Encounter not found for this patient.'
-    } else {
-      encounter.value = match
-    }
   } finally {
     loading.value = false
   }

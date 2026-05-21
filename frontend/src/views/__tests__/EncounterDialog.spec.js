@@ -3,15 +3,15 @@ import { mount, flushPromises } from '@vue/test-utils'
 import { createRouter, createMemoryHistory } from 'vue-router'
 import { createPinia, setActivePinia } from 'pinia'
 
-// Mock the API module — listEncounters replaces the raw fetch the component uses
-// to load encounter metadata (watch-out from task spec: raw fetch was replaced
-// in Task 10 with listEncounters, so we mock the module, not global.fetch).
+// Mock the API module — getEncounterFacts is the new single-call source of
+// truth for the dialog's left column (encounter, thisEncounter, background,
+// documents). The older path that went through listEncounters is gone.
 vi.mock('../../api/client.js', () => ({
+  getEncounterFacts: vi.fn(),
   getLatestEncounterSummary: vi.fn(),
   getLatestEncounterCoding: vi.fn(),
   summarizeEncounter: vi.fn(),
   suggestEncounterCoding: vi.fn(),
-  listEncounters: vi.fn(),
 }))
 
 import * as api from '../../api/client.js'
@@ -46,26 +46,31 @@ const stubs = {
   'SectionHeader': { template: '<div class="section-header">{{ title }}</div>', props: ['title', 'icon'] },
   'EmptyState': { template: '<div class="empty-state">{{ title }}</div>', props: ['icon', 'title'] },
   'GraphView': { template: '<div class="graph-view"/>', props: ['scope', 'patientId', 'encounterIds', 'height'] },
+  'FactSection': { template: '<div class="fact-section">{{ title }} ({{ items.length }})</div>', props: ['title', 'icon', 'items'] },
 }
 
-const ENCOUNTER_LIST = [
-  {
+const FACTS_E1 = {
+  encounter: {
     encounterId: 'E1',
+    patientId: 'HN1',
     type: 'admission',
     dateTime: '2026-04-01T08:00:00+00:00',
     department: 'IM',
     provider: 'Dr A',
-    docCount: 1,
-    hasSummary: false,
-    hasCoding: false,
   },
-]
+  thisEncounter: {
+    problems: [], medications: [], observations: [], procedures: [],
+    plans: [], allergies: [], diagnoses: [], codingCandidates: [],
+  },
+  background: { chronicProblems: [], homeMedications: [], knownAllergies: [] },
+  documents: [],
+}
 
 beforeEach(() => {
   setActivePinia(createPinia())
   vi.clearAllMocks()
-  // Default: listEncounters returns a list with E1
-  api.listEncounters.mockResolvedValue(ENCOUNTER_LIST)
+  // Default: getEncounterFacts returns the E1 shape above.
+  api.getEncounterFacts.mockResolvedValue(FACTS_E1)
 })
 
 async function makeWrapper(props) {
@@ -118,10 +123,33 @@ describe('EncounterDialog.vue', () => {
   it('shows error when encounter not found', async () => {
     api.getLatestEncounterSummary.mockResolvedValue(null)
     api.getLatestEncounterCoding.mockResolvedValue(null)
-    // Override: listEncounters returns empty list → no match for E1
-    api.listEncounters.mockResolvedValue([])
+    // The facts endpoint returns 404 when the encounter doesn't belong to
+    // this patient. axios rejects with an error carrying response.status.
+    api.getEncounterFacts.mockRejectedValue({ response: { status: 404 } })
     const w = await makeWrapper()
     await flushPromises()
     expect(w.text()).toContain('Encounter not found')
+  })
+
+  it('renders thisEncounter facts in the left column without a summary', async () => {
+    api.getLatestEncounterSummary.mockResolvedValue(null)
+    api.getLatestEncounterCoding.mockResolvedValue(null)
+    api.getEncounterFacts.mockResolvedValue({
+      ...FACTS_E1,
+      thisEncounter: {
+        ...FACTS_E1.thisEncounter,
+        problems: [{ id: 'f-1', value: 'Pneumonia', normalized_code: 'J18.9' }],
+        observations: [{ id: 'f-2', value: 'HbA1c', extra: { value: '7.4', unit: '%' } }],
+      },
+    })
+    const w = await makeWrapper()
+    await flushPromises()
+    // FactSection stub renders "<title> (<count>)" — assert both sections
+    // appeared with the right counts so we know thisEncounter actually
+    // reached the template, not just the empty state.
+    const txt = w.text()
+    expect(txt).toContain('Problems (1)')
+    expect(txt).toContain('Observations (1)')
+    expect(txt).not.toContain('This encounter has no extracted facts')
   })
 })
