@@ -258,15 +258,32 @@ The prod overlay differs from dev in:
 
 ### TLS modes
 
-The Caddyfile handles three deployments:
+The Caddyfile handles four deployments, picked by what you put in `CNG_DOMAIN`:
 
 | Setup | `CNG_DOMAIN` | Result |
 |---|---|---|
-| **Public host with Let's Encrypt** | `cng.example.com` | Caddy fetches a real cert via ACME HTTP-01. Renewal is automatic. Ports 80 + 443 must be Internet-reachable. |
+| **Public host with Let's Encrypt** | `cng.example.com` | Caddy fetches a real cert via ACME HTTP-01. Renewal is automatic. Ports 80 + 443 must be Internet-reachable. Set `CADDY_EMAIL` for renewal notifications. |
+| **Behind another reverse proxy** *(TLS terminated upstream)* | `:80` | Caddy serves plain HTTP on port 80 — no ACME, no cert. Upstream `X-Forwarded-Proto` / `X-Forwarded-Host` are trusted (private-CIDR proxies by default) and passed through to the backend. Your upstream owns the cert + HTTPS redirect. |
 | **Local prod test** | `localhost` | Plain HTTP on port 80, no cert. Useful to smoke-test the prod overlay before DNS is ready. |
-| **Behind an existing load balancer** (TLS-terminating) | the LB hostname | Caddy still serves HTTPS, but if the LB terminates TLS in front, set `CNG_DOMAIN` to the public hostname and have the LB forward to Caddy on port 80. Caddy still adds the security headers; the LB owns the cert. |
+| **Private CA / internal mTLS** | a non-public hostname (e.g. `cng.internal.lan`) | Caddy still tries ACME and will fail. Replace the `{$CNG_DOMAIN}` block in `caddy/Caddyfile.prod` with an explicit `tls /etc/cert.pem /etc/key.pem` and mount the cert + key in. |
 
-For internal-only deployments where you want HTTPS without a public DNS record, swap to a private CA — replace `caddy/Caddyfile.prod`'s `{$CNG_DOMAIN}` block with a `tls` directive pointing at your cert/key paths and mount them in.
+#### Tuning the behind-proxy mode
+
+Extra env vars (all optional):
+
+| Var | Default | Effect |
+|---|---|---|
+| `CNG_TRUSTED_PROXIES` | `private_ranges` | CIDR(s) Caddy will trust `X-Forwarded-*` from. Override if your upstream lives outside RFC1918 / docker / k8s ranges. |
+| `CNG_HSTS` | `max-age=31536000; includeSubDomains` | Strict-Transport-Security header. **Disable** when terminating TLS upstream if the upstream isn't already setting it — set to `max-age=0`. |
+
+Example `.env` for behind-proxy mode:
+
+```bash
+CNG_DOMAIN=:80
+FRONTEND_ORIGIN=https://cng.example.com   # the public-facing URL, used for CORS
+BACKEND_API_KEY=...
+# CADDY_EMAIL not required (no ACME)
+```
 
 ### Resource sizing
 
