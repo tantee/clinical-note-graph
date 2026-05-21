@@ -64,10 +64,25 @@ def _get_presidio_analyzer():
         if _PRESIDIO_FAILED:
             return None
         try:
+            import os
             from presidio_analyzer import AnalyzerEngine
+            from presidio_analyzer.nlp_engine import NlpEngineProvider
             from app.services.deidentify_recognizers import build_presidio_recognizers
 
-            analyzer = AnalyzerEngine()
+            # Pin spaCy to the model we actually install in the Dockerfile.
+            # Presidio's default is `en_core_web_lg` (587 MB) which it will
+            # try to *download at startup* when missing — that fights for
+            # write permissions on the non-root container and reliably
+            # blows past the backend healthcheck. The `_sm` model is good
+            # enough for safe_harbor + the regex layer catches the rest;
+            # override via DEIDENT_SPACY_MODEL=en_core_web_lg if you've
+            # baked the bigger model into the image.
+            model_name = os.environ.get("DEIDENT_SPACY_MODEL", "en_core_web_sm")
+            nlp_engine = NlpEngineProvider(nlp_configuration={
+                "nlp_engine_name": "spacy",
+                "models": [{"lang_code": "en", "model_name": model_name}],
+            }).create_engine()
+            analyzer = AnalyzerEngine(nlp_engine=nlp_engine, supported_languages=["en"])
             for rec in build_presidio_recognizers():
                 analyzer.registry.add_recognizer(rec)
             _PRESIDIO_ANALYZER = analyzer

@@ -73,6 +73,9 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       DEIDENTIFY_LEVEL: ${DEIDENTIFY_LEVEL:-safe_harbor}
       DEIDENTIFY_NER_THRESHOLD: ${DEIDENTIFY_NER_THRESHOLD:-0.5}
+      # Pin Presidio's NER backend to the spaCy model the Dockerfile
+      # installs. Override only if you've baked a larger model in.
+      DEIDENT_SPACY_MODEL: ${DEIDENT_SPACY_MODEL:-en_core_web_sm}
     ports:
       - "${BACKEND_PORT:-8000}:8000"
     volumes:
