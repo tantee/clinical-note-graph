@@ -12,7 +12,12 @@ services:
       - pgdata:/var/lib/postgresql/data
       - ./backend/db/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-cng}"]
+      # Pass -d explicitly. Without it pg_isready defaults to a database
+      # named after the user (PGDATABASE → POSTGRES_USER → 'cng'), which
+      # doesn't exist and causes a 'FATAL: database "cng" does not exist'
+      # in the postgres log every interval. The check still passes (the
+      # server IS reachable), but the noise is misleading on first boot.
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-cng} -d ${POSTGRES_DB:-clinical_graph}"]
       interval: 5s
       timeout: 5s
       retries: 10
