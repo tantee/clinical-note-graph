@@ -396,6 +396,13 @@ def gather_encounter_facts(encounter_id: str) -> dict[str, Any]:
                 "encounterId": d.get("encounter_id"),
                 "format": d.get("format"),
                 "version": d.get("version"),
+                # Needed by the encounter dialog's Timeline tab to order
+                # documents chronologically — fall back to created_at when
+                # received_at isn't set on older rows.
+                "receivedAt": str(d["received_at"]) if d.get("received_at") else (
+                    str(d["created_at"]) if d.get("created_at") else None
+                ),
+                "sourceSystem": d.get("source_system"),
             }
             for d in docs
         ],
