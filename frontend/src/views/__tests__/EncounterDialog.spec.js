@@ -12,6 +12,12 @@ vi.mock('../../api/client.js', () => ({
   getLatestEncounterCoding: vi.fn(),
   summarizeEncounter: vi.fn(),
   suggestEncounterCoding: vi.fn(),
+  // Powering the new Notes / EMR-vs-facts / AI-output tabs added in the
+  // tab-strip refactor — default mocks return empty so the existing
+  // assertions that focus on the toolbar stay valid.
+  getNotes: vi.fn(),
+  getNote: vi.fn(),
+  getDocument: vi.fn(),
 }))
 
 import * as api from '../../api/client.js'
@@ -47,6 +53,9 @@ const stubs = {
   'EmptyState': { template: '<div class="empty-state">{{ title }}</div>', props: ['icon', 'title'] },
   'GraphView': { template: '<div class="graph-view"/>', props: ['scope', 'patientId', 'encounterIds', 'height'] },
   'FactSection': { template: '<div class="fact-section">{{ title }} ({{ items.length }})</div>', props: ['title', 'icon', 'items'] },
+  'MarkdownViewer': { template: '<div class="markdown-viewer"/>', props: ['path', 'content', 'backlinks'] },
+  'v-chip': { template: '<span><slot/></span>', props: ['size', 'variant', 'color'] },
+  'v-data-table': { template: '<table/>', props: ['headers', 'items'] },
 }
 
 const FACTS_E1 = {
@@ -71,6 +80,12 @@ beforeEach(() => {
   vi.clearAllMocks()
   // Default: getEncounterFacts returns the E1 shape above.
   api.getEncounterFacts.mockResolvedValue(FACTS_E1)
+  // Notes / document fetches fire on mount as part of fetchAll(); stub
+  // empty defaults so the existing tests don't have to mock them
+  // explicitly. Tests that exercise Notes/EMR-vs-facts override locally.
+  api.getNotes.mockResolvedValue({ files: [] })
+  api.getNote.mockResolvedValue({ path: '', content: '', backlinks: [] })
+  api.getDocument.mockResolvedValue({ document: {}, facts: [], aiOutput: null })
 })
 
 async function makeWrapper(props) {

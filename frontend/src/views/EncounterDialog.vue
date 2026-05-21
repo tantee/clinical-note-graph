@@ -36,14 +36,25 @@
         </v-btn>
       </v-toolbar>
 
-      <v-tabs v-model="tab" color="primary" density="comfortable">
-        <v-tab value="detail" prepend-icon="mdi-text-box-outline">Detail</v-tab>
+      <!-- Tab strip mirrors PatientDetail's layout so the two views feel
+           consistent. Tabs that only make sense at patient scope (Timeline,
+           Encounters) are deliberately omitted — see /docs/features.md.
+           `flex-shrink-0` keeps the tab strip at its natural height inside
+           the dialog's `d-flex flex-column` container (without it the
+           flexbox collapses the tabs to ~13 px, leaving them invisible). -->
+      <v-tabs v-model="tab" color="primary" density="comfortable" show-arrows
+              class="flex-shrink-0">
+        <v-tab value="overview" prepend-icon="mdi-view-dashboard-outline">Overview</v-tab>
+        <v-tab value="notes" prepend-icon="mdi-file-document-multiple-outline">Notes</v-tab>
         <v-tab value="graph" prepend-icon="mdi-graph-outline">Graph</v-tab>
+        <v-tab value="raw" prepend-icon="mdi-text-box-search-outline">EMR vs facts</v-tab>
+        <v-tab value="ai" prepend-icon="mdi-robot-outline">AI output</v-tab>
       </v-tabs>
       <v-divider />
 
-      <v-window v-model="tab" class="flex-grow-1 overflow-y-auto">
-        <v-window-item value="detail">
+      <v-window v-model="tab" class="flex-grow-1 overflow-y-auto" :touch="false">
+        <!-- Overview tab — current "Detail" content -->
+        <v-window-item value="overview">
           <div v-if="loading" class="d-flex justify-center pa-8">
             <v-progress-circular indeterminate />
           </div>
@@ -56,14 +67,6 @@
                 <SummaryCard :value="summary" />
                 <CodingCard :value="codingResp" />
 
-                <!-- This-encounter facts: rendered as one v-list, mirroring
-                     the Background panel on the right. FactSection emits a
-                     v-list-subheader + v-list-items, so the parent v-list's
-                     native padding applies and the two columns line up.
-                     `mt-4` only when there's a preceding card — otherwise
-                     this card would sit 16px below the Background card on
-                     the right because SummaryCard/CodingCard use v-if=value
-                     and contribute no height when empty. -->
                 <v-card v-if="hasThisEncounterFacts"
                         :class="{ 'mt-4': summary || codingResp }">
                   <SectionHeader title="This encounter" icon="mdi-clipboard-text-outline" />
@@ -76,21 +79,9 @@
                   </v-list>
                 </v-card>
 
-                <!-- Same conditional-spacing rule as This-encounter above. -->
-                <v-card v-if="docs.length"
-                        :class="{ 'mt-4': summary || codingResp || hasThisEncounterFacts }">
-                  <SectionHeader title="Documents" icon="mdi-file-multiple-outline" />
-                  <v-divider />
-                  <v-list density="compact" nav>
-                    <v-list-item v-for="d in docs" :key="d.documentId"
-                                 :title="d.documentId"
-                                 :subtitle="`v${d.version} · ${d.format}`" />
-                  </v-list>
-                </v-card>
-
-                <v-alert v-if="!summary && !codingResp && !hasThisEncounterFacts && !docs.length"
+                <v-alert v-if="!summary && !codingResp && !hasThisEncounterFacts"
                          type="info" variant="tonal">
-                  This encounter has no extracted facts or documents yet.
+                  This encounter has no extracted facts yet.
                   Click <strong>Summarize</strong> or <strong>Coding</strong> to generate output.
                 </v-alert>
               </v-col>
@@ -117,8 +108,134 @@
           </div>
         </v-window-item>
 
+        <!-- Notes — the encounter's vault folder + the markdown for whatever
+             is selected. We re-use the patient-level getNotes endpoint and
+             filter client-side; encounter-scope files live under
+             patients/<HN>/encounters/<eid>/. -->
+        <v-window-item value="notes">
+          <div class="pa-4">
+            <v-row>
+              <v-col cols="12" md="4">
+                <v-card>
+                  <SectionHeader title="Files" icon="mdi-folder-multiple-outline" />
+                  <v-divider />
+                  <v-list density="compact" nav>
+                    <v-list-item
+                      v-for="f in encounterNotes"
+                      :key="f.path"
+                      :title="f.name"
+                      :prepend-icon="noteIcon(f.kind)"
+                      :active="selectedNote?.path === f.path"
+                      @click="openNote(f.path)"
+                    />
+                    <EmptyState v-if="!encounterNotes.length"
+                                icon="mdi-folder-open-outline"
+                                title="No notes yet"
+                                hint="Generate Summary or Coding to populate." />
+                  </v-list>
+                </v-card>
+              </v-col>
+              <v-col cols="12" md="8">
+                <MarkdownViewer
+                  v-if="selectedNote"
+                  :path="selectedNote.path"
+                  :content="selectedNote.content"
+                  :backlinks="selectedNote.backlinks"
+                  @open="openNote"
+                />
+                <v-alert v-else type="info" variant="tonal">
+                  Select a file from the list.
+                </v-alert>
+              </v-col>
+            </v-row>
+          </div>
+        </v-window-item>
+
+        <!-- Graph — single-encounter subgraph -->
         <v-window-item value="graph" class="h-100">
           <GraphView scope="encounter" :patient-id="patientId" :encounter-ids="[eid]" :height="640" />
+        </v-window-item>
+
+        <!-- EMR vs facts — same three-column layout as PatientDetail but
+             pre-scoped to this encounter's documents. -->
+        <v-window-item value="raw">
+          <div class="pa-4">
+            <v-row>
+              <v-col cols="12" md="3">
+                <v-card>
+                  <SectionHeader title="Documents" icon="mdi-file-multiple-outline" />
+                  <v-divider />
+                  <v-list density="compact" nav>
+                    <v-list-item
+                      v-for="d in docs"
+                      :key="d.documentId"
+                      :title="d.documentId"
+                      :subtitle="`v${d.version} · ${d.format}`"
+                      :active="selectedDocument?.document?.document_id === d.documentId"
+                      @click="openDocument(d.documentId)"
+                    />
+                    <EmptyState v-if="!docs.length"
+                                icon="mdi-file-question-outline"
+                                title="No documents on this encounter" />
+                  </v-list>
+                </v-card>
+              </v-col>
+              <v-col cols="12" md="4">
+                <v-card>
+                  <SectionHeader title="Raw EMR" icon="mdi-text-box-outline" />
+                  <v-divider />
+                  <v-card-text>
+                    <pre v-if="selectedDocument?.document?.raw_content" class="cng-raw cng-raw-fill">{{ selectedDocument.document.raw_content }}</pre>
+                    <EmptyState v-else icon="mdi-text-box-outline" title="No document selected" />
+                  </v-card-text>
+                </v-card>
+              </v-col>
+              <v-col cols="12" md="5">
+                <v-card>
+                  <SectionHeader title="Extracted facts" icon="mdi-format-list-bulleted-square">
+                    <template #actions>
+                      <v-chip v-if="selectedDocument?.facts?.length" size="x-small" variant="tonal">
+                        {{ selectedDocument.facts.length }}
+                      </v-chip>
+                    </template>
+                  </SectionHeader>
+                  <v-divider />
+                  <v-list density="comfortable">
+                    <v-list-item v-for="f in selectedDocument?.facts || []" :key="f.id" :title="f.value">
+                      <template #prepend>
+                        <v-icon :color="FACT_TYPE_META[f.type]?.color || 'grey'">
+                          {{ FACT_TYPE_META[f.type]?.icon || 'mdi-circle-medium' }}
+                        </v-icon>
+                      </template>
+                      <v-list-item-subtitle>
+                        <v-chip size="x-small" class="mr-2" variant="tonal">{{ f.type }}</v-chip>
+                        <span v-if="f.normalized_code">{{ f.coding_system }}: {{ f.normalized_code }}</span>
+                        <span v-if="f.confidence != null"> · conf {{ f.confidence.toFixed(2) }}</span>
+                      </v-list-item-subtitle>
+                    </v-list-item>
+                    <EmptyState v-if="!selectedDocument?.facts?.length"
+                                icon="mdi-format-list-bulleted-square" title="No facts" />
+                  </v-list>
+                </v-card>
+              </v-col>
+            </v-row>
+          </div>
+        </v-window-item>
+
+        <!-- AI output — raw model response for the document picked on EMR vs
+             facts. Stays in sync via selectedDocument shared state. -->
+        <v-window-item value="ai">
+          <div class="pa-4">
+            <v-card>
+              <SectionHeader title="Latest AI output for selected document" icon="mdi-robot-outline" />
+              <v-divider />
+              <v-card-text>
+                <pre v-if="selectedDocument?.aiOutput" class="cng-raw">{{ JSON.stringify(selectedDocument.aiOutput.raw_output, null, 2) }}</pre>
+                <EmptyState v-else icon="mdi-robot-confused-outline" title="No AI output"
+                            hint="Select a document on the EMR vs facts tab." />
+              </v-card-text>
+            </v-card>
+          </div>
         </v-window-item>
       </v-window>
     </v-card>
@@ -129,17 +246,21 @@
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import {
+  getDocument,
   getEncounterFacts,
   getLatestEncounterSummary, getLatestEncounterCoding,
+  getNote, getNotes,
   summarizeEncounter, suggestEncounterCoding,
 } from '../api/client.js'
 import { useUiStore } from '../stores/ui.js'
+import { FACT_TYPE_META } from '../constants/clinical.js'
 import SummaryCard from '../components/SummaryCard.vue'
 import CodingCard from '../components/CodingCard.vue'
 import SectionHeader from '../components/SectionHeader.vue'
 import EmptyState from '../components/EmptyState.vue'
 import FactSection from '../components/FactSection.vue'
 import GraphView from '../components/GraphView.vue'
+import MarkdownViewer from '../components/MarkdownViewer.vue'
 
 const props = defineProps({
   patientId: { type: String, required: true },
@@ -150,7 +271,7 @@ defineEmits(['close'])
 const route = useRoute()
 const ui = useUiStore()
 
-const tab = ref('detail')
+const tab = ref('overview')
 const loading = ref(true)
 const error = ref('')
 const encounter = ref(null)
@@ -164,6 +285,13 @@ const summary = ref(null)
 const codingResp = ref(null)
 const busy = reactive({ summary: false, coding: false })
 
+// Notes tab state
+const notes = ref([])
+const selectedNote = ref(null)
+
+// EMR vs facts + AI output share the same selected document
+const selectedDocument = ref(null)
+
 const hasThisEncounterFacts = computed(() => {
   const t = thisEncounter.value
   return (
@@ -172,10 +300,6 @@ const hasThisEncounterFacts = computed(() => {
   )
 })
 
-// Drive the template loop from data so the dividers between groups are
-// rendered between (not after) each section. Order matches the clinical
-// reading flow: problems first, then meds, then numeric findings, then
-// procedures, plans, and finally any extra diagnosis candidates.
 const thisEncounterGroups = computed(() => {
   const t = thisEncounter.value
   return [
@@ -188,22 +312,36 @@ const thisEncounterGroups = computed(() => {
   ].filter((g) => g.items.length)
 })
 
+// Encounter-scoped vault files. The patient `getNotes` endpoint returns
+// every file under patients/<HN>/; we filter to anything that lives under
+// encounters/<eid>/ (sources, AI-generated summary/coding) so the user
+// sees only the files that relate to this admission/visit.
+const encounterNotes = computed(() => {
+  const needle = `/encounters/${props.eid}/`
+  return (notes.value || []).filter((f) => f.path.includes(needle))
+})
+
+function noteIcon(kind) {
+  return {
+    visits: 'mdi-calendar-text',
+    summaries: 'mdi-text-box-outline',
+    coding: 'mdi-tag-text-outline',
+    sources: 'mdi-text-box',
+  }[kind] || 'mdi-file-document-outline'
+}
+
 async function fetchAll() {
   loading.value = true
   error.value = ''
   try {
-    // gather_encounter_facts is the single source of truth for the dialog
-    // header (encounter metadata), the left-column facts, the right-column
-    // background, AND the documents list. Older code split this across
-    // three endpoints and silently rendered a blank pane when none of them
-    // returned anything — see bug fix in fix/encounter-dialog-blank.
-    const [facts, sum, cod] = await Promise.all([
+    const [facts, sum, cod, allNotes] = await Promise.all([
       getEncounterFacts(props.patientId, props.eid).catch((e) => {
         if (e?.response?.status === 404) error.value = 'Encounter not found for this patient.'
         return null
       }),
       getLatestEncounterSummary(props.patientId, props.eid).catch(() => null),
       getLatestEncounterCoding(props.patientId, props.eid).catch(() => null),
+      getNotes(props.patientId).catch(() => ({ files: [] })),
     ])
     if (facts) {
       encounter.value = facts.encounter || null
@@ -226,8 +364,34 @@ async function fetchAll() {
     }
     summary.value = sum
     codingResp.value = cod?.payload || cod || null
+    notes.value = allNotes?.files || []
+    // Auto-open the first encounter note (typically the source admission_note.md)
+    if (encounterNotes.value.length) {
+      await openNote(encounterNotes.value[0].path)
+    }
+    // Auto-open the first encounter document so EMR vs facts and AI output
+    // have something to show without an extra click.
+    if (docs.value.length) {
+      await openDocument(docs.value[0].documentId)
+    }
   } finally {
     loading.value = false
+  }
+}
+
+async function openNote(path) {
+  try {
+    selectedNote.value = await getNote(props.patientId, path)
+  } catch {
+    ui.error('Failed to load note')
+  }
+}
+
+async function openDocument(documentId) {
+  try {
+    selectedDocument.value = await getDocument(props.patientId, documentId)
+  } catch {
+    ui.error('Failed to load document')
   }
 }
 
@@ -236,6 +400,9 @@ async function loadSummary(type) {
   try {
     summary.value = await summarizeEncounter(props.patientId, props.eid, { type, includeEvidence: false })
     ui.success('Summary ready')
+    // Reload notes so the new summary's vault file shows up under Notes.
+    const all = await getNotes(props.patientId).catch(() => null)
+    if (all) notes.value = all.files || []
   } catch {
     ui.error('Failed to generate summary')
   } finally {
@@ -250,6 +417,8 @@ async function loadCoding() {
       standards: ['ICD10', 'SNOMEDCT'], includeEvidence: false,
     })
     ui.success('Coding suggestion ready')
+    const all = await getNotes(props.patientId).catch(() => null)
+    if (all) notes.value = all.files || []
   } catch {
     ui.error('Failed to suggest coding')
   } finally {
