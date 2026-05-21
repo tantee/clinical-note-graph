@@ -59,6 +59,26 @@ The vector index is empty for that patient. Two common causes:
 - The ingest happened before embedding was wired up (or the embedding model was unavailable that day). Re-trigger: `POST /api/jobs/{id}/requeue` on the relevant ingest job, or re-ingest the document.
 - The patient ID in the URL doesn't match the `patient_id` in the embeddings table. Check `SELECT DISTINCT patient_id FROM embeddings;` and compare.
 
+## "Blocked request. This host (...) is not allowed."
+
+You're hitting the Vite dev server (`docker compose up`) via a hostname other than `localhost`. Vite 5+ rejects non-allowlisted host headers by default.
+
+Two fixes:
+
+- **Per-host allow-list** — set `VITE_ALLOWED_HOSTS=cng.example.com,other.host` in `.env` and `docker compose restart frontend`. Comma-separated; supports leading-dot wildcards like `.example.com`.
+- **Allow all** (default in this repo) — leave `VITE_ALLOWED_HOSTS` unset and Vite falls back to `allowedHosts: 'all'`. Safe because Caddy is the public entry point.
+
+This issue **doesn't apply to production** (`docker-compose.prod.yml`). The prod overlay disables the Vite container and Caddy serves pre-built static files directly — `npm run build` runs at image-build time, the dev server never starts.
+
+## "Vite is silent — how do I see what it's doing?"
+
+Two knobs in `.env`:
+
+- `VITE_LOG_LEVEL=info` (default; bump to `warn` / `error` / `silent` to quiet things down).
+- `VITE_DEBUG=1` — turns on Node's `debug()` output for every Vite namespace (`DEBUG=vite:*`). Verbose but invaluable when chasing host-header rejects, missing imports, plugin order issues, or HMR drops.
+
+Apply with `docker compose restart frontend` and tail `docker compose logs -f frontend`.
+
 ## "The frontend can't reach the backend"
 
 Three layers of failure:

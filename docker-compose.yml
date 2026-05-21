@@ -96,6 +96,14 @@ services:
       # resolved against whichever origin served the page (the Caddy proxy).
       # Note the `-` (not `:-`) so an explicit empty string in .env stays empty.
       VITE_API_BASE: ${VITE_API_BASE-}
+      # Vite verbosity knobs. Bump to debug noisy issues like blocked
+      # host headers or HMR drops — see docs/troubleshooting.md.
+      VITE_LOG_LEVEL: ${VITE_LOG_LEVEL:-info}
+      VITE_DEBUG: ${VITE_DEBUG:-}
+      # When the dev server lives behind a custom domain (e.g. Caddy →
+      # public hostname), set VITE_ALLOWED_HOSTS to a comma-separated
+      # list so Vite stops blocking those host headers. Default is 'all'.
+      VITE_ALLOWED_HOSTS: ${VITE_ALLOWED_HOSTS-}
     ports:
       - "${FRONTEND_PORT:-5173}:5173"
     volumes:
