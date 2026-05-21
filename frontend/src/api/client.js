@@ -36,6 +36,18 @@ const isCanceledError = (err) =>
   || axios.isCancel?.(err)
   || err?.message === 'canceled'
 
+// Track whether we've already shown the API-key prompt this session so
+// repeated 401s (e.g. every protected endpoint failing on first paint)
+// don't spam the snackbar. Reset when the user actually sets a key
+// (handled in ConfigView).
+let apiKeyPromptShown = false
+
+function isMissingApiKey401(err) {
+  if (err.response?.status !== 401) return false
+  const d = err.response.data?.detail
+  return typeof d === 'string' && /X-API-Key/i.test(d)
+}
+
 api.interceptors.response.use(
   (r) => r,
   (err) => {
@@ -45,10 +57,25 @@ api.interceptors.response.use(
       return Promise.reject(err)
     }
     if (err.config?.silent !== true) {
-      const msg = err.response?.data?.detail || err.message || 'Request failed'
       try {
         const ui = useUiStore()
-        ui.error(typeof msg === 'string' ? msg : JSON.stringify(msg))
+        if (isMissingApiKey401(err)) {
+          // First 401 from a fresh deployment: the user has no idea
+          // where to set the key. Surface a longer, action-oriented
+          // toast (and only once) instead of the raw backend message
+          // repeated for every protected endpoint that just 401'd.
+          if (!apiKeyPromptShown) {
+            apiKeyPromptShown = true
+            ui.error(
+              'Backend requires an X-API-Key. Open Config → Browser API key, ' +
+              'paste the value from your BACKEND_API_KEY env var, and Save.',
+              { timeout: 10000 },
+            )
+          }
+        } else {
+          const msg = err.response?.data?.detail || err.message || 'Request failed'
+          ui.error(typeof msg === 'string' ? msg : JSON.stringify(msg))
+        }
       } catch {
         // Pinia not ready yet at boot; ignore.
       }
@@ -56,6 +83,12 @@ api.interceptors.response.use(
     return Promise.reject(err)
   },
 )
+
+// Reset the once-per-session 401 prompt so the user gets a fresh
+// warning if they later clear / mistype the key.
+export function resetApiKeyPromptShown() {
+  apiKeyPromptShown = false
+}
 
 const data = (r) => r.data
 
