@@ -45,10 +45,10 @@
       <v-tabs v-model="tab" color="primary" density="comfortable" show-arrows
               class="flex-shrink-0">
         <v-tab value="overview" prepend-icon="mdi-view-dashboard-outline">Overview</v-tab>
+        <v-tab value="timeline" prepend-icon="mdi-timeline-text-outline">Timeline</v-tab>
         <v-tab value="notes" prepend-icon="mdi-file-document-multiple-outline">Notes</v-tab>
         <v-tab value="graph" prepend-icon="mdi-graph-outline">Graph</v-tab>
         <v-tab value="raw" prepend-icon="mdi-text-box-search-outline">EMR vs facts</v-tab>
-        <v-tab value="ai" prepend-icon="mdi-robot-outline">AI output</v-tab>
       </v-tabs>
       <v-divider />
 
@@ -105,6 +105,46 @@
                 </v-card>
               </v-col>
             </v-row>
+          </div>
+        </v-window-item>
+
+        <!-- Timeline — at encounter scope the timeline collapses to the
+             source documents attached to this admission/visit. One card
+             per document with format, version, source system, and a
+             relative timestamp. -->
+        <v-window-item value="timeline">
+          <div class="pa-4">
+            <v-card>
+              <SectionHeader title="Documents on this encounter" icon="mdi-file-multiple-outline">
+                <template #actions>
+                  <v-chip v-if="docs.length" size="x-small" variant="tonal">{{ docs.length }}</v-chip>
+                </template>
+              </SectionHeader>
+              <v-divider />
+              <v-list density="comfortable">
+                <v-list-item
+                  v-for="d in docs"
+                  :key="d.documentId"
+                  :title="d.documentId"
+                  @click="openDocumentAndJump(d.documentId)"
+                >
+                  <template #prepend>
+                    <v-icon color="primary">mdi-file-document-outline</v-icon>
+                  </template>
+                  <v-list-item-subtitle>
+                    <v-chip size="x-small" class="mr-2" variant="tonal">{{ d.format || '?' }}</v-chip>
+                    <span v-if="d.version">v{{ d.version }}</span>
+                    <span v-if="d.encounterId" class="text-grey-darken-1 ml-2">· {{ d.encounterId }}</span>
+                  </v-list-item-subtitle>
+                  <template #append>
+                    <v-icon size="small" color="grey">mdi-arrow-right</v-icon>
+                  </template>
+                </v-list-item>
+                <EmptyState v-if="!docs.length"
+                            icon="mdi-file-question-outline"
+                            title="No documents on this encounter" />
+              </v-list>
+            </v-card>
           </div>
         </v-window-item>
 
@@ -219,24 +259,28 @@
                 </v-card>
               </v-col>
             </v-row>
-          </div>
-        </v-window-item>
 
-        <!-- AI output — raw model response for the document picked on EMR vs
-             facts. Stays in sync via selectedDocument shared state. -->
-        <v-window-item value="ai">
-          <div class="pa-4">
-            <v-card>
-              <SectionHeader title="Latest AI output for selected document" icon="mdi-robot-outline" />
-              <v-divider />
-              <v-card-text>
-                <pre v-if="selectedDocument?.aiOutput" class="cng-raw">{{ JSON.stringify(selectedDocument.aiOutput.raw_output, null, 2) }}</pre>
-                <EmptyState v-else icon="mdi-robot-confused-outline" title="No AI output"
-                            hint="Select a document on the EMR vs facts tab." />
-              </v-card-text>
+            <!-- Raw AI output for the selected document — folded into this
+                 tab as a collapsible card so reviewers can compare the
+                 model's literal response against the extracted facts above
+                 without flipping tabs. -->
+            <v-card v-if="selectedDocument" class="mt-4">
+              <v-expansion-panels variant="accordion">
+                <v-expansion-panel>
+                  <v-expansion-panel-title>
+                    <v-icon class="mr-2" color="primary">mdi-robot-outline</v-icon>
+                    Raw AI output
+                  </v-expansion-panel-title>
+                  <v-expansion-panel-text>
+                    <pre v-if="selectedDocument.aiOutput" class="cng-raw">{{ JSON.stringify(selectedDocument.aiOutput.raw_output, null, 2) }}</pre>
+                    <EmptyState v-else icon="mdi-robot-confused-outline" title="No AI output for this document" />
+                  </v-expansion-panel-text>
+                </v-expansion-panel>
+              </v-expansion-panels>
             </v-card>
           </div>
         </v-window-item>
+
       </v-window>
     </v-card>
   </v-dialog>
@@ -393,6 +437,15 @@ async function openDocument(documentId) {
   } catch {
     ui.error('Failed to load document')
   }
+}
+
+// Click a row on the Timeline tab → load the document AND switch to the
+// EMR vs facts tab so the user immediately sees raw text + facts side by
+// side. The folded Raw-AI-output panel below the facts list will pick up
+// the same selection automatically.
+async function openDocumentAndJump(documentId) {
+  await openDocument(documentId)
+  tab.value = 'raw'
 }
 
 async function loadSummary(type) {
