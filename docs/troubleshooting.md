@@ -59,6 +59,35 @@ The vector index is empty for that patient. Two common causes:
 - The ingest happened before embedding was wired up (or the embedding model was unavailable that day). Re-trigger: `POST /api/jobs/{id}/requeue` on the relevant ingest job, or re-ingest the document.
 - The patient ID in the URL doesn't match the `patient_id` in the embeddings table. Check `SELECT DISTINCT patient_id FROM embeddings;` and compare.
 
+## "Backend unhealthy — spaCy model download stuck at 587 MB"
+
+In the backend log:
+
+```
+WARNING:presidio-analyzer:Model en_core_web_lg is not installed. Downloading...
+Defaulting to user installation because normal site-packages is not writeable
+Downloading … en_core_web_lg-3.7.1-py3-none-any.whl (587.7 MB)
+…
+Container cng-backend  Error  dependency failed to start: container cng-backend is unhealthy
+```
+
+Presidio's default NER model is `en_core_web_lg` (~587 MB) but the Dockerfile only installs `en_core_web_sm`. The non-root container user can't write to system `site-packages` and the 100 s healthcheck window expires long before the runtime download finishes anyway.
+
+**Fix:** the latest backend code reads `DEIDENT_SPACY_MODEL` (defaults to `en_core_web_sm` — the model already in the image), so Presidio uses the bundled `_sm` model and never tries to download. Pull, rebuild, and bring the stack back up:
+
+```bash
+git pull
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build backend
+```
+
+If you specifically want the larger-recall `en_core_web_lg`, add it to `backend/Dockerfile`:
+
+```dockerfile
+RUN python -m spacy download en_core_web_lg
+```
+
+…then set `DEIDENT_SPACY_MODEL=en_core_web_lg` in `.env`.
+
 ## "Blocked request. This host (...) is not allowed."
 
 You're hitting the Vite dev server (`docker compose up`) via a hostname other than `localhost`. Vite 5+ rejects non-allowlisted host headers by default.
