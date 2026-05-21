@@ -16,6 +16,13 @@ const vuetify = createVuetify({
     VTextField: { variant: 'outlined', density: 'comfortable' },
     VSelect: { variant: 'outlined', density: 'comfortable' },
     VTextarea: { variant: 'outlined', density: 'comfortable' },
+    // Vuetify's defaults for combobox/autocomplete are 'filled' — they render
+    // with an underline instead of a full border, which is visually
+    // inconsistent with the rest of the app (Patient combobox in Vector page,
+    // EMR ingest patient picker, etc). Force the same outlined variant so
+    // every text-like input matches.
+    VCombobox: { variant: 'outlined', density: 'comfortable' },
+    VAutocomplete: { variant: 'outlined', density: 'comfortable' },
   },
   theme: {
     defaultTheme: 'light',
