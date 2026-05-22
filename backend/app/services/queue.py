@@ -132,8 +132,15 @@ class QueueWorker:
         try:
             result = await handler(job, on_progress=on_progress)
         except Exception as exc:  # noqa: BLE001
-            logger.exception("job %s failed: %s", job["job_id"], exc)
-            await self._finalize_failure(job, str(exc))
+            # Log the full traceback to the backend log AND persist a
+            # one-line "ClassName: message" summary to jobs.error so the
+            # UI can render something useful without us shipping multi-
+            # line tracebacks across the wire. The full traceback stays
+            # in the container logs for ops to grep.
+            logger.exception(
+                "job %s (type=%s) failed: %s", job["job_id"], job["type"], exc,
+            )
+            await self._finalize_failure(job, f"{type(exc).__name__}: {exc}")
             return
 
         await self._finalize_success(job, result, progress)

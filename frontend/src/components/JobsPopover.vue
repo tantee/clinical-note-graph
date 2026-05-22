@@ -87,7 +87,7 @@
           <v-icon size="small" color="error" class="mr-1">mdi-alert-circle-outline</v-icon>
           <span class="text-caption">Recently failed ({{ failed.length }})</span>
         </div>
-        <v-list density="compact" lines="two">
+        <v-list density="compact" lines="three">
           <v-list-item
             v-for="j in failed"
             :key="`f-${j.job_id}`"
@@ -102,8 +102,20 @@
               <span v-if="j.patient_id" class="text-grey-darken-1">· {{ j.patient_id }}</span>
             </v-list-item-title>
             <v-list-item-subtitle>
-              <v-chip size="x-small" class="mr-1" color="error" variant="tonal">failed</v-chip>
-              <span class="text-caption text-grey-darken-1">{{ elapsed(j) }}</span>
+              <div>
+                <v-chip size="x-small" class="mr-1" color="error" variant="tonal">failed</v-chip>
+                <span class="text-caption text-grey-darken-1">{{ elapsed(j) }}</span>
+              </div>
+              <!-- Show the persisted error so the user can tell at a
+                   glance *why* the job failed without opening Debug →
+                   Jobs. Truncated to one line; full text in the
+                   browser tooltip so a copy/paste is one hover away. -->
+              <div
+                v-if="j.error"
+                class="text-caption text-error text-truncate"
+                :title="j.error"
+                style="max-width: 280px;"
+              >{{ j.error }}</div>
             </v-list-item-subtitle>
             <template #append>
               <v-btn

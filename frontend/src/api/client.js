@@ -61,16 +61,13 @@ api.interceptors.response.use(
         const ui = useUiStore()
         if (isMissingApiKey401(err)) {
           // First 401 from a fresh deployment: the user has no idea
-          // where to set the key. Surface a longer, action-oriented
-          // toast (and only once) instead of the raw backend message
-          // repeated for every protected endpoint that just 401'd.
+          // where to set the key. Pop a forced modal dialog (only
+          // once, so repeated 401s on page-load don't re-trigger it)
+          // instead of a transient toast — the snackbar was easy to
+          // miss when every protected endpoint 401'd on first paint.
           if (!apiKeyPromptShown) {
             apiKeyPromptShown = true
-            ui.error(
-              'Backend requires an X-API-Key. Open Config → Browser API key, ' +
-              'paste the value from your BACKEND_API_KEY env var, and Save.',
-              { timeout: 10000 },
-            )
+            ui.promptApiKey()
           }
         } else {
           const msg = err.response?.data?.detail || err.message || 'Request failed'
