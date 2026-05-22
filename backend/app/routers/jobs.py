@@ -39,7 +39,7 @@ def list_jobs(
         rows = s.execute(
             text(
                 "SELECT job_id::text AS job_id, type, status, patient_id, document_id, attempts, "
-                "started_at, finished_at, created_at, progress FROM jobs "
+                "started_at, finished_at, created_at, progress, error FROM jobs "
                 + clause + " ORDER BY created_at DESC LIMIT :lim OFFSET :off"
             ),
             params,

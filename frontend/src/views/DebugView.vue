@@ -130,6 +130,22 @@
                 {{ item.status }}
               </v-chip>
             </template>
+            <template #item.error="{ item }">
+              <!-- Truncated inline; full text on hover via title attr,
+                   plus a "Details" button that opens a drawer with the
+                   complete error + progress trace for diagnosis. -->
+              <div v-if="item.error" class="d-flex align-center" style="max-width: 360px;">
+                <span class="text-caption text-error text-truncate" :title="item.error">
+                  {{ item.error }}
+                </span>
+                <v-btn
+                  size="x-small" variant="text" class="ml-1" icon="mdi-information-outline"
+                  aria-label="Show failure detail"
+                  @click.stop="openJobDetail(item)"
+                />
+              </div>
+              <span v-else class="text-caption text-grey-darken-1">—</span>
+            </template>
             <template #item.actions="{ item }">
               <v-btn
                 v-if="item.status === 'failed'"
@@ -142,6 +158,27 @@
             </template>
           </v-data-table>
         </v-card>
+
+        <v-navigation-drawer v-model="jobDrawer" location="right" width="640" temporary>
+          <v-card flat>
+            <SectionHeader title="Job failure detail" icon="mdi-alert-circle-outline" />
+            <v-divider />
+            <v-card-text v-if="selectedJob">
+              <div class="mb-2">
+                <v-chip size="x-small" color="error" variant="tonal" class="mr-1">{{ selectedJob.status }}</v-chip>
+                <span class="text-caption">{{ selectedJob.type }} · {{ selectedJob.job_id }}</span>
+              </div>
+              <div v-if="selectedJob.patient_id" class="text-caption text-grey-darken-1 mb-2">
+                Patient: {{ selectedJob.patient_id }}
+              </div>
+              <v-alert v-if="selectedJob.error" type="error" variant="tonal" density="compact" class="mb-3">
+                <pre class="cng-raw" style="white-space: pre-wrap;">{{ selectedJob.error }}</pre>
+              </v-alert>
+              <div class="text-caption text-grey-darken-1 mb-1">Progress trace</div>
+              <pre class="cng-raw">{{ JSON.stringify(selectedJob.progress || {}, null, 2) }}</pre>
+            </v-card-text>
+          </v-card>
+        </v-navigation-drawer>
       </v-window-item>
     </v-window>
   </div>
@@ -254,12 +291,20 @@ const jobsHeaders = [
   { title: 'Patient',  key: 'patient_id' },
   { title: 'Status',   key: 'status' },
   { title: 'Attempts', key: 'attempts', align: 'end' },
+  { title: 'Error',    key: 'error', sortable: false },
   { title: '',         key: 'actions', sortable: false, align: 'end' },
 ]
 
 const jobsRows = ref([])
 const jobsLoading = ref(false)
 const jobsStatus = ref('')
+const jobDrawer = ref(false)
+const selectedJob = ref(null)
+
+function openJobDetail(item) {
+  selectedJob.value = item
+  jobDrawer.value = true
+}
 
 async function loadJobs() {
   jobsLoading.value = true

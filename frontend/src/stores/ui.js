@@ -4,6 +4,10 @@ export const useUiStore = defineStore('ui', {
   state: () => ({
     theme: localStorage.getItem('cng_theme') || 'light',
     snackbar: { show: false, message: '', color: 'info', timeout: 4000 },
+    // Force-shown modal when the backend requires an X-API-Key and the
+    // browser doesn't have one set (or the one it has is wrong). Driven
+    // by the axios 401 interceptor; bound by ApiKeyPromptDialog.vue.
+    apiKeyDialog: false,
   }),
   actions: {
     setTheme(t) {
@@ -23,5 +27,7 @@ export const useUiStore = defineStore('ui', {
     error(msg, opts = {}) { this.notify(msg, 'error', opts.timeout ?? 6000) },
     warning(msg) { this.notify(msg, 'warning') },
     dismiss() { this.snackbar.show = false },
+    promptApiKey() { this.apiKeyDialog = true },
+    dismissApiKeyDialog() { this.apiKeyDialog = false },
   },
 })

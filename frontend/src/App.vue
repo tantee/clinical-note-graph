@@ -71,17 +71,28 @@
       <v-spacer />
       <a :href="apiDocsUrl" target="_blank" class="text-grey">OpenAPI</a>
     </v-footer>
+
+    <!-- Mounted once at the app root so the axios 401 interceptor can
+         pop it from anywhere without each view having to render its
+         own copy. -->
+    <ApiKeyPromptDialog />
   </v-app>
 </template>
 
 <script setup>
 import { computed } from 'vue'
 import { useUiStore } from './stores/ui.js'
+import ApiKeyPromptDialog from './components/ApiKeyPromptDialog.vue'
 import JobsPopover from './components/JobsPopover.vue'
 import PatientSearchInput from './components/PatientSearchInput.vue'
 
 const ui = useUiStore()
-const apiDocsUrl = computed(() => (import.meta.env.VITE_API_BASE || 'http://localhost:8000') + '/docs')
+// In prod (behind the Caddy proxy that fronts the backend) and in dev (when
+// the UI is opened via the proxy port) the page origin already routes /docs
+// to the backend. Hard-coding http://localhost:8000 here broke the link in
+// every prod deployment. Fall back to a relative URL so it follows the page
+// origin; set VITE_API_BASE only when the backend lives on a different host.
+const apiDocsUrl = computed(() => (import.meta.env.VITE_API_BASE || '') + '/docs')
 </script>
 
 <style scoped>
