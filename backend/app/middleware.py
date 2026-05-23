@@ -35,15 +35,21 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
         return response
 
 
-_PROTECTED_PREFIXES = ("/api/emr", "/api/config", "/api/export", "/api/facts", "/api/debug")
+# Gate the entire /api/* surface. The previous allow-list was a leaky
+# subset that missed /api/patients, /api/patient/{id}, /api/jobs,
+# /api/rag/ask, /api/search/* etc. — i.e. patient PHI and LLM-cost
+# endpoints were reachable with no key in prod when API_KEY was set.
+# Anonymous-safe routes (/health, /ready, /docs, /openapi.json) live
+# outside /api/ and are unaffected.
+_PROTECTED_PREFIX = "/api/"
 
 
 class ApiKeyMiddleware(BaseHTTPMiddleware):
-    """Optional API key gate. If API_KEY env is set, protected paths require X-API-Key."""
+    """Optional API key gate. If API_KEY env is set, /api/* requires X-API-Key."""
 
     async def dispatch(self, request: Request, call_next):
         api_key = get_settings().API_KEY
-        if api_key and any(request.url.path.startswith(p) for p in _PROTECTED_PREFIXES):
+        if api_key and request.url.path.startswith(_PROTECTED_PREFIX):
             supplied = request.headers.get("X-API-Key")
             if supplied != api_key:
                 return JSONResponse(

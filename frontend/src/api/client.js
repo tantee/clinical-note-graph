@@ -36,12 +36,6 @@ const isCanceledError = (err) =>
   || axios.isCancel?.(err)
   || err?.message === 'canceled'
 
-// Track whether we've already shown the API-key prompt this session so
-// repeated 401s (e.g. every protected endpoint failing on first paint)
-// don't spam the snackbar. Reset when the user actually sets a key
-// (handled in ConfigView).
-let apiKeyPromptShown = false
-
 function isMissingApiKey401(err) {
   if (err.response?.status !== 401) return false
   const d = err.response.data?.detail
@@ -60,15 +54,15 @@ api.interceptors.response.use(
       try {
         const ui = useUiStore()
         if (isMissingApiKey401(err)) {
-          // First 401 from a fresh deployment: the user has no idea
-          // where to set the key. Pop a forced modal dialog (only
-          // once, so repeated 401s on page-load don't re-trigger it)
-          // instead of a transient toast — the snackbar was easy to
-          // miss when every protected endpoint 401'd on first paint.
-          if (!apiKeyPromptShown) {
-            apiKeyPromptShown = true
-            ui.promptApiKey()
-          }
+          // The dialog's own open state is the dedupe guard: parallel
+          // 401s on first paint find it already open and no-op, but
+          // dismissing it without saving a key (e.g. clicking "Open
+          // Config") leaves it closed — so the next 401 on whatever
+          // page the user lands on reopens it. Earlier this used a
+          // once-per-session boolean latch, which meant the prompt
+          // never reappeared after the first dismissal even though
+          // every subsequent /api/* call still 401'd.
+          if (!ui.apiKeyDialog) ui.promptApiKey()
         } else {
           const msg = err.response?.data?.detail || err.message || 'Request failed'
           ui.error(typeof msg === 'string' ? msg : JSON.stringify(msg))
@@ -80,12 +74,6 @@ api.interceptors.response.use(
     return Promise.reject(err)
   },
 )
-
-// Reset the once-per-session 401 prompt so the user gets a fresh
-// warning if they later clear / mistype the key.
-export function resetApiKeyPromptShown() {
-  apiKeyPromptShown = false
-}
 
 const data = (r) => r.data
 
