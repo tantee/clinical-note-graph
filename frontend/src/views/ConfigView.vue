@@ -176,7 +176,6 @@
 import { computed, onMounted, ref } from 'vue'
 import {
   getConfig, patchConfig, listExportProfiles, upsertExportProfile,
-  resetApiKeyPromptShown,
 } from '../api/client.js'
 import { useUiStore } from '../stores/ui.js'
 import SectionHeader from '../components/SectionHeader.vue'
@@ -297,10 +296,6 @@ async function saveProfile() {
 function saveBrowserKey() {
   if (browserKey.value) localStorage.setItem('cng_api_key', browserKey.value)
   else localStorage.removeItem('cng_api_key')
-  // Re-arm the once-per-session "missing X-API-Key" toast so the user
-  // gets a fresh warning if a future request still 401s (typo, wrong
-  // backend, etc).
-  resetApiKeyPromptShown()
   ui.success('Browser API key saved.')
 }
 function clearBrowserKey() {
