@@ -64,7 +64,6 @@
 import { computed, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useUiStore } from '../stores/ui.js'
-import { resetApiKeyPromptShown } from '../api/client.js'
 
 const ui = useUiStore()
 const router = useRouter()
@@ -95,9 +94,6 @@ function onSave() {
     return
   }
   localStorage.setItem('cng_api_key', v)
-  // Clear the once-per-session 401 latch so a future bad key reopens
-  // the dialog instead of silently swallowing the next 401.
-  resetApiKeyPromptShown()
   ui.dismissApiKeyDialog()
   ui.success('API key saved — retry your action.')
 }

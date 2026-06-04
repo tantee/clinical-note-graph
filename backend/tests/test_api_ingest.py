@@ -143,3 +143,16 @@ def test_api_key_enforced_when_configured(monkeypatch, app_client):
         assert r.status_code == 401
         r = client.post("/api/emr/ingest?async=false", json=_admission_payload(), headers={"X-API-Key": "test-key"})
         assert r.status_code == 200
+
+        # Endpoints under /api/patient(s) and friends are also PHI — they
+        # must require the key. (Regression: an earlier allow-list only
+        # gated /api/emr|/api/config|/api/export|/api/facts|/api/debug,
+        # leaving patient list + detail open.)
+        assert client.get("/api/patients").status_code == 401
+        assert client.get("/api/patient/anything").status_code == 401
+        assert client.get("/api/jobs").status_code == 401
+        # With a valid key the same paths stop returning 401.
+        assert client.get("/api/patients", headers={"X-API-Key": "test-key"}).status_code != 401
+
+        # Anonymous-safe routes outside /api/ stay open even with API_KEY set.
+        assert client.get("/health").status_code == 200
