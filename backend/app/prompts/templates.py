@@ -7,6 +7,38 @@ You MUST return JSON conforming exactly to the ClinicalExtractionResult schema.
 Do not invent codes. If you are uncertain, leave codes null and lower confidence.
 Always preserve the original evidence text for each fact in `evidenceText`.
 
+# Medication timing and schedule
+
+For every medication, populate the following fields when supported by the
+source EMR:
+- `startDate` / `stopDate`: ISO date (YYYY-MM-DD) when the document states
+  one explicitly.
+- `startQualifier` / `stopQualifier`: one of `exact | estimated | before |
+  unknown` for start; one of `exact | estimated | ongoing | unknown` for
+  stop.
+  - Use `exact` when a precise date is given ("started 10 Jan 2026").
+  - Use `estimated` ONLY for near-term relative expressions that carry
+    usable precision ("started 2 weeks ago", "since last winter"): convert
+    that phrase to a concrete date anchored on the encounter date and set
+    qualifier to `estimated`. If no encounter date is available to anchor
+    the relative expression, do not invent a date — use `before` (or
+    `unknown`) and leave the date null.
+  - Use `before` when the medication pre-dates the note with no clear start
+    ("long-standing", "on for years", "since childhood"). Very vague
+    expressions like "years ago" / "since childhood" have no usable
+    precision: use `before` with a null date rather than forcing a
+    speculative estimate.
+  - Use `ongoing` for `stopQualifier` when the patient is still taking the
+    medication — leave `stopDate` null in that case.
+  - Use `unknown` when there is no usable temporal information.
+- `startText` / `stopText`: preserve the original phrase from the note
+  (e.g. "started 2 weeks ago") so reviewers can verify the estimated
+  conversion.
+- `schedule`: free-text dosing cadence that cannot be captured as a
+  regular interval — for example "q3wk x 6 cycles", "ATB x7d",
+  "pulse therapy monthly". Leave null when the standard dose/frequency
+  fields are sufficient.
+
 # Temporality + severity on conditions
 
 For every condition / problem, populate when the source EMR supports it:
@@ -17,8 +49,28 @@ For every condition / problem, populate when the source EMR supports it:
   suspected | ruled_out | inactive`. Default to `active` for newly-stated
   problems; mark `resolved` only when the document explicitly says so;
   `suspected` for differential diagnoses; `ruled_out` for excluded ones.
-- `onsetDate` / `resolvedDate`: only when the document gives a specific
-  date. Don't approximate; leave null when uncertain.
+- `onsetDate` / `resolvedDate`: ISO date (YYYY-MM-DD) when the document
+  states one. For near-term relative expressions with usable precision
+  ("about 4 months ago"), convert to an estimated date anchored on the
+  encounter date and set the corresponding qualifier to `estimated`; keep
+  the original phrase in `onsetText` / `resolvedText`.
+- `onsetQualifier` / `resolvedQualifier`: one of `exact | estimated |
+  before | unknown` for onset; one of `exact | estimated | ongoing |
+  unknown` for resolved.
+  - Use `exact` when a precise date is given.
+  - Use `estimated` when you derived the date from a near-term relative
+    phrase (set the date, qualifier = `estimated`, preserve phrase in
+    `onsetText`). If no encounter date is available to anchor the relative
+    expression, do not invent a date — use `before` (or `unknown`) and
+    leave the date null.
+  - Use `before` when the condition predates the note with no clear onset
+    ("pre-existing", "known since years ago", "since childhood"). Very
+    vague expressions like "years ago" / "since childhood" have no usable
+    precision: use `before` with a null date rather than forcing a
+    speculative estimate.
+  - Use `ongoing` for `resolvedQualifier` when the condition has not yet
+    resolved — leave `resolvedDate` null.
+  - Use `unknown` when there is no usable temporal information.
 
 # Inter-fact relationships
 

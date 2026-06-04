@@ -43,3 +43,15 @@ def test_patient_fact_qualifiers_default_none():
     p = PatientFact(type="condition", value="diabetes")
     assert p.onsetQualifier is None
     assert p.resolvedQualifier is None
+
+
+def test_extraction_prompt_mentions_temporal_guidance():
+    from app.prompts import templates
+
+    assert hasattr(templates, "EXTRACTION_SYSTEM"), "EXTRACTION_SYSTEM constant renamed?"
+    text = templates.EXTRACTION_SYSTEM.lower()
+    # Estimated-date anchoring + open bounds must be described to the model.
+    assert "estimated" in text
+    assert "ongoing" in text
+    assert "schedule" in text
+    assert "encounter date" in text
