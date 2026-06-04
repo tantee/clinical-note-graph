@@ -8,10 +8,18 @@ Two halves:
 """
 from __future__ import annotations
 
+import json
+import logging
 from datetime import date, datetime
 from typing import Any
 
-from app.schemas.extraction import MedicationChange, PatientFact
+from sqlalchemy import text
+
+from app.db import neo4j_client
+from app.db.postgres import db_session
+from app.schemas.extraction import ClinicalExtractionResult, MedicationChange, PatientFact
+
+logger = logging.getLogger(__name__)
 
 # Curated columns the AI is allowed to populate/refresh. Order is irrelevant.
 AI_FILLABLE_FIELDS: tuple[str, ...] = (
@@ -134,3 +142,180 @@ def merge_curated(
         row["record_state"] = "active"
         row["review_status"] = "ai_suggested"
     return row, False
+
+
+# --- SQL (named constants; the test FakeStore matches them by substring) ------
+
+_SELECT_BY_IDENTITY = text("""
+SELECT * FROM curated_facts
+WHERE patient_id = :pid AND type = :type AND normalized_key = :nk
+""")
+
+_SELECT_ACTIVE_BY_TYPE = text("""
+SELECT * FROM curated_facts
+WHERE patient_id = :pid AND type = :type AND record_state = 'active'
+ORDER BY display_value ASC
+""")
+
+_SELECT_BY_ID = text("SELECT * FROM curated_facts WHERE id = CAST(:cid AS uuid)")
+
+_INSERT = text("""
+INSERT INTO curated_facts (
+    patient_id, type, normalized_key, display_value, normalized_code, coding_system,
+    start_date, start_qualifier, stop_date, stop_qualifier, start_text, stop_text,
+    schedule_text, status, record_state, review_status, origin,
+    human_edited_fields, last_evidence_fact_id, updated_by
+) VALUES (
+    :patient_id, :type, :normalized_key, :display_value, :normalized_code, :coding_system,
+    :start_date, :start_qualifier, :stop_date, :stop_qualifier, :start_text, :stop_text,
+    :schedule_text, :status, :record_state, :review_status, :origin,
+    CAST(:human_edited_fields AS jsonb), :last_evidence_fact_id, :updated_by
+)
+RETURNING id
+""")
+
+_UPDATE = text("""
+UPDATE curated_facts SET
+    display_value = :display_value, normalized_code = :normalized_code,
+    coding_system = :coding_system, start_date = :start_date,
+    start_qualifier = :start_qualifier, stop_date = :stop_date,
+    stop_qualifier = :stop_qualifier, start_text = :start_text, stop_text = :stop_text,
+    schedule_text = :schedule_text, status = :status, record_state = :record_state,
+    review_status = :review_status, human_edited_fields = CAST(:human_edited_fields AS jsonb),
+    last_evidence_fact_id = :last_evidence_fact_id, updated_by = :updated_by,
+    updated_at = now()
+WHERE id = CAST(:cid AS uuid)
+""")
+
+
+def _to_dict(row) -> dict[str, Any]:
+    d = dict(row)
+    if "id" in d and d["id"] is not None:
+        d["id"] = str(d["id"])
+    hef = d.get("human_edited_fields")
+    if isinstance(hef, str):
+        d["human_edited_fields"] = json.loads(hef)
+    elif hef is None:
+        d["human_edited_fields"] = []
+    return d
+
+
+def list_curated(patient_id: str, type_: str) -> list[dict[str, Any]]:
+    with db_session() as s:
+        rows = s.execute(_SELECT_ACTIVE_BY_TYPE, {"pid": patient_id, "type": type_}).mappings().all()
+    return [_to_dict(r) for r in rows]
+
+
+def get_curated(cid: str) -> dict[str, Any] | None:
+    with db_session() as s:
+        row = s.execute(_SELECT_BY_ID, {"cid": cid}).mappings().first()
+    return _to_dict(row) if row else None
+
+
+def _persist_merged(s, *, patient_id: str, existing: dict | None, row: dict,
+                    is_new: bool, evidence_fact_id: str | None, updated_by: str | None) -> str:
+    payload = {
+        "patient_id": patient_id,
+        "type": row["type"],
+        "normalized_key": row["normalized_key"],
+        "display_value": row["display_value"],
+        "normalized_code": row.get("normalized_code"),
+        "coding_system": row.get("coding_system"),
+        "start_date": row.get("start_date"),
+        "start_qualifier": row.get("start_qualifier") or "unknown",
+        "stop_date": row.get("stop_date"),
+        "stop_qualifier": row.get("stop_qualifier") or "unknown",
+        "start_text": row.get("start_text"),
+        "stop_text": row.get("stop_text"),
+        "schedule_text": row.get("schedule_text"),
+        "status": row.get("status"),
+        "record_state": row.get("record_state", "active"),
+        "review_status": row.get("review_status", "ai_suggested"),
+        "origin": row.get("origin", "ai"),
+        "human_edited_fields": json.dumps(row.get("human_edited_fields") or []),
+        "last_evidence_fact_id": evidence_fact_id,
+        "updated_by": updated_by,
+    }
+    if is_new:
+        res = s.execute(_INSERT, payload).mappings().first()
+        if not res:
+            raise RuntimeError("curated_facts INSERT returned no id")
+        return str(res["id"])
+    payload["cid"] = existing["id"]
+    s.execute(_UPDATE, payload)
+    return str(existing["id"])
+
+
+def reconcile_curated(patient_id: str, extraction: ClinicalExtractionResult) -> None:
+    """Upsert each AI problem/medication into curated_facts by identity, then push
+    the resulting values into Neo4j. Best-effort and isolated per item — one failure
+    is logged and never aborts the others or the ingest."""
+    ai_items: list[dict[str, Any]] = []
+    for p in getattr(extraction, "problems", []) or []:
+        ai_items.append(ai_item_from_condition(p))
+    for m in getattr(extraction, "medications", []) or []:
+        ai_items.append(ai_item_from_medication(m))
+
+    for ai in ai_items:
+        try:
+            with db_session() as s:
+                existing_row = s.execute(
+                    _SELECT_BY_IDENTITY,
+                    {"pid": patient_id, "type": ai["type"], "nk": ai["normalized_key"]},
+                ).mappings().first()
+                existing = _to_dict(existing_row) if existing_row else None
+                resurface = bool(existing) and existing.get("record_state") == "dismissed"
+                merged, is_new = merge_curated(existing, ai, resurface=resurface)
+                cid = _persist_merged(
+                    s, patient_id=patient_id, existing=existing, row=merged,
+                    is_new=is_new, evidence_fact_id=None, updated_by=None,
+                )
+            merged["id"] = cid
+            propagate_curated_to_graph(patient_id, merged)
+        except Exception:  # noqa: BLE001 — resilience matches graph-write behavior
+            logger.exception("curated reconcile failed for %s", ai.get("normalized_key"))
+
+
+# --- Neo4j propagation -------------------------------------------------------
+
+# Curated values OVERRIDE the AI-set node properties (spec: the graph render shows
+# the curated row when one exists). We intentionally SET unconditionally rather than
+# coalesce: a human who clears an onset/start date must be able to blank it in the
+# graph too. reconcile mirrors every AI mention, so this does not lose AI dates.
+_CYPHER_CONDITION = """
+MERGE (c:Condition {patientId: $patientId, value: $value})
+  ON CREATE SET c.firstSeen = datetime()
+  SET c.onsetDate = $startDate, c.resolvedDate = $stopDate,
+      c.startQualifier = $startQualifier, c.stopQualifier = $stopQualifier,
+      c.status = coalesce($status, c.status),
+      c.curatedReviewStatus = $reviewStatus, c.lastSeen = datetime()
+"""
+
+_CYPHER_MEDICATION = """
+MERGE (m:Medication {patientId: $patientId, name: $value})
+  ON CREATE SET m.firstSeen = datetime()
+  SET m.startDate = $startDate, m.stopDate = $stopDate,
+      m.startQualifier = $startQualifier, m.stopQualifier = $stopQualifier,
+      m.scheduleText = $scheduleText, m.lastAction = coalesce($status, m.lastAction),
+      m.curatedReviewStatus = $reviewStatus, m.lastSeen = datetime()
+"""
+
+
+def propagate_curated_to_graph(patient_id: str, row: dict[str, Any]) -> None:
+    """Push curated values into the matching Neo4j node. Best-effort."""
+    params = {
+        "patientId": patient_id,
+        "value": row["display_value"],
+        "startDate": row.get("start_date"),
+        "stopDate": row.get("stop_date"),
+        "startQualifier": row.get("start_qualifier"),
+        "stopQualifier": row.get("stop_qualifier"),
+        "scheduleText": row.get("schedule_text"),
+        "status": row.get("status"),
+        "reviewStatus": row.get("review_status"),
+    }
+    cypher = _CYPHER_CONDITION if row["type"] == "condition" else _CYPHER_MEDICATION
+    try:
+        neo4j_client.run_cypher(cypher, params)
+    except Exception:  # noqa: BLE001
+        logger.exception("curated graph propagation failed for %s", row.get("display_value"))
