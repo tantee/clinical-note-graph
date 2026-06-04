@@ -16,6 +16,8 @@ ClinicalStatus = Literal[
     "active", "resolved", "in_remission", "recurrent",
     "suspected", "ruled_out", "inactive",
 ]
+StartQualifier = Literal["exact", "estimated", "before", "unknown"]
+StopQualifier = Literal["exact", "estimated", "ongoing", "unknown"]
 
 
 class StrictBase(BaseModel):
@@ -43,6 +45,11 @@ class PatientFact(StrictBase):
     status: ClinicalStatus | None = None
     onsetDate: datetime | None = None
     resolvedDate: datetime | None = None
+    # Qualifier + free-text hedges for the onset/resolved dates above
+    onsetQualifier: StartQualifier | None = None
+    resolvedQualifier: StopQualifier | None = None
+    onsetText: str | None = None
+    resolvedText: str | None = None
     extra: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -64,6 +71,13 @@ class MedicationChange(StrictBase):
     route: str | None = None
     frequency: str | None = None
     indication: str | None = None
+    startDate: datetime | None = None
+    startQualifier: StartQualifier | None = None
+    stopDate: datetime | None = None
+    stopQualifier: StopQualifier | None = None
+    startText: str | None = None
+    stopText: str | None = None
+    schedule: str | None = None
     evidenceText: str | None = None
     confidence: float = Field(default=0.5, ge=0.0, le=1.0)
 
