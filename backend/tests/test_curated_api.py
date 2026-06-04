@@ -97,3 +97,20 @@ def test_delete_missing_id_404(app_client, patient):
 def test_restore_missing_id_404(app_client, patient):
     r = app_client.post("/api/curated/nope/restore")
     assert r.status_code == 404
+
+
+def test_patch_rename_codeless_updates_normalized_key(app_client, patient, fake_store, stub_neo4j):
+    fake_store.curated_facts.append({
+        "id": "curR", "patient_id": "HN1", "type": "condition",
+        "normalized_key": "high blood pressure", "display_value": "high blood pressure",
+        "normalized_code": None, "coding_system": None, "start_date": None,
+        "start_qualifier": "unknown", "stop_date": None, "stop_qualifier": "ongoing",
+        "start_text": None, "stop_text": None, "schedule_text": None, "status": "active",
+        "record_state": "active", "review_status": "ai_suggested", "origin": "ai",
+        "human_edited_fields": [], "last_evidence_fact_id": None,
+    })
+    r = app_client.patch("/api/curated/curR", json={"displayValue": "Hypertension"})
+    assert r.status_code == 200, r.text
+    row = next(x for x in fake_store.curated_facts if x["id"] == "curR")
+    assert row["display_value"] == "Hypertension"
+    assert row["normalized_key"] == "hypertension"   # identity followed the rename

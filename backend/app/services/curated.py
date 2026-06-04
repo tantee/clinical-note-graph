@@ -176,6 +176,7 @@ RETURNING id
 
 _UPDATE = text("""
 UPDATE curated_facts SET
+    normalized_key = :normalized_key,
     display_value = :display_value, normalized_code = :normalized_code,
     coding_system = :coding_system, start_date = :start_date,
     start_qualifier = :start_qualifier, stop_date = :stop_date,
@@ -268,7 +269,7 @@ def reconcile_curated(patient_id: str, extraction: ClinicalExtractionResult) -> 
                 merged, is_new = merge_curated(existing, ai, resurface=resurface)
                 cid = _persist_merged(
                     s, patient_id=patient_id, existing=existing, row=merged,
-                    is_new=is_new, evidence_fact_id=None, updated_by=None,
+                    is_new=is_new, evidence_fact_id=None, updated_by="ai",
                 )
             merged["id"] = cid
             propagate_curated_to_graph(patient_id, merged)
@@ -391,6 +392,7 @@ def update_curated(cid: str, patch: dict[str, Any]) -> dict[str, Any] | None:
         merged.get("stop_date"), merged.get("stop_qualifier"),
     )
     merged.update(start_date=s_date, start_qualifier=s_q, stop_date=e_date, stop_qualifier=e_q)
+    merged["normalized_key"] = normalized_key(merged.get("normalized_code"), merged["display_value"])
     merged["review_status"] = "human_confirmed"
     merged["human_edited_fields"] = sorted(edited)
     with db_session() as s:
