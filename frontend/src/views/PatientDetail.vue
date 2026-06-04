@@ -65,6 +65,14 @@
       <v-window-item value="overview" eager>
         <v-row>
           <v-col cols="12" md="6">
+            <CuratedPanel :patient-id="props.id" type="condition" title="Problems" />
+          </v-col>
+          <v-col cols="12" md="6">
+            <CuratedPanel :patient-id="props.id" type="medication" title="Medications" />
+          </v-col>
+        </v-row>
+        <v-row>
+          <v-col cols="12" md="6">
             <FactCard
               title="Active problems" icon="mdi-medical-bag" color="deep-orange"
               :items="patient?.problems || []" empty="No problems extracted yet"
@@ -347,6 +355,7 @@ import SummaryCard from '../components/SummaryCard.vue'
 import CodingCard from '../components/CodingCard.vue'
 import EncounterDialog from './EncounterDialog.vue'
 import JobConfirmationDialog from '../components/JobConfirmationDialog.vue'
+import CuratedPanel from '../components/CuratedPanel.vue'
 
 const props = defineProps({ id: { type: String, required: true } })
 const ui = useUiStore()
