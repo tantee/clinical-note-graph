@@ -95,6 +95,7 @@ class FakeStore:
         self.pricing: dict[str, dict] = {}
         self.patient_summaries: list[dict] = []
         self.patient_search_results: list[dict] | None = None  # set via prime_patient_search_results()
+        self.curated_facts: list[dict] = []   # curated longitudinal rows (Task 5+)
 
     def prime_patient_search_results(self, rows: list[dict]) -> None:
         """Tests call this to seed what the next /api/search/patients call returns.
@@ -544,6 +545,50 @@ class FakeStore:
         if "select 1" in s:
             return FakeResult([{"?column?": 1}])
 
+        # ---- curated_facts (Task 5+) --------------------------------------
+        if s.startswith("insert into curated_facts"):
+            row = dict(params)
+            row["id"] = f"curated-{len(self.curated_facts) + 1}"
+            hef = row.get("human_edited_fields")
+            row["human_edited_fields"] = json.loads(hef) if isinstance(hef, str) else (hef or [])
+            self.curated_facts.append(row)
+            return FakeResult([{"id": row["id"]}])
+
+        if "from curated_facts" in s:
+            def _copy(r):
+                c = dict(r)
+                c["human_edited_fields"] = list(r.get("human_edited_fields") or [])
+                return c
+
+            if "id = cast(:cid as uuid)" in s:
+                rows = [r for r in self.curated_facts if str(r["id"]) == str(params.get("cid"))]
+                return FakeResult([_copy(r) for r in rows])
+            rows = [r for r in self.curated_facts if r["patient_id"] == params.get("pid")]
+            if "type = :type" in s:
+                rows = [r for r in rows if r["type"] == params.get("type")]
+            if "normalized_key = :nk" in s:
+                rows = [r for r in rows if r["normalized_key"] == params.get("nk")]
+            if "record_state = 'active'" in s:
+                rows = [r for r in rows if r.get("record_state") == "active"]
+            if "order by display_value" in s:
+                rows = sorted(rows, key=lambda r: (r.get("display_value") or ""))
+            return FakeResult([_copy(r) for r in rows])
+
+        if s.startswith("update curated_facts"):
+            cid = str(params.get("cid"))
+            target = next((r for r in self.curated_facts if str(r["id"]) == cid), None)
+            if target is not None:
+                if "record_state = :state" in s:
+                    target["record_state"] = params.get("state")
+                else:
+                    for k, v in params.items():
+                        if k == "cid":
+                            continue
+                        if k == "human_edited_fields":
+                            v = json.loads(v) if isinstance(v, str) else (v or [])
+                        target[k] = v
+            return FakeResult([])
+
         return FakeResult([])
 
 
@@ -587,6 +632,8 @@ def fake_store(monkeypatch):
     monkeypatch.setattr(queue_mod, "db_session", _db_session)
     import app.services.debug_queries as debug_queries_mod
     monkeypatch.setattr(debug_queries_mod, "db_session", _db_session)
+    import app.services.curated as curated_mod
+    monkeypatch.setattr(curated_mod, "db_session", _db_session, raising=False)
     import app.routers.config as cfg_router
     monkeypatch.setattr(cfg_router, "db_session", _db_session)
     import app.routers.patient as p_router
