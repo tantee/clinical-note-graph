@@ -14,6 +14,7 @@ from app.db.postgres import db_session
 from app.schemas.emr import EMRIngestRequest
 from app.schemas.extraction import ClinicalExtractionResult
 from app.services.ai_provider import get_ai_provider
+from app.services.curated import reconcile_curated
 from app.services.embeddings import embed_and_store_many
 from app.services.fhir_adapter import fhir_bundle_to_text, fhir_extract_patient
 from app.services.graph_updater import update_graph_for_document
@@ -225,6 +226,14 @@ def _persist_post_extraction(*, patient: dict[str, Any], encounter: dict[str, An
             s.execute(text(_FACT_INSERT), rows)
         audit(s, action="FACTS_PERSISTED", target_type="document", target_id=document["documentId"],
               payload={"count": len(rows)})
+
+    # Reconcile AI mentions into the curated longitudinal layer. Best-effort:
+    # reconcile_curated isolates per-item failures internally.
+    if valid:
+        try:
+            reconcile_curated(patient["patientId"], extraction)
+        except Exception:
+            logger.exception("reconcile_curated failed (top-level); ingest unaffected")
 
 
 async def run_ingest_pipeline(
