@@ -9,7 +9,14 @@ from sqlalchemy import text
 from app.db.helpers import audit
 from app.db.postgres import db_session
 from app.schemas.coding import CodingSuggestRequest, CodingSuggestResponse, SummaryRequest, SummaryResponse
+from app.schemas.curated import CuratedCreate, CuratedItem, CuratedList, CuratedPatch
 from app.services.coding import suggest_coding
+from app.services.curated import (
+    insert_curated,
+    list_curated,
+    set_record_state,
+    update_curated,
+)
 from app.services.embeddings import vector_search
 from app.services.graph_updater import fetch_patient_graph  # noqa: F401 (kept for any legacy callers)
 from app.services.markdown_generator import collect_backlinks, list_patient_files, read_note
@@ -403,6 +410,44 @@ def review_fact(fact_id: str, status: str = Query(..., pattern="^(human_confirme
         )
         audit(s, actor="human", action="REVIEW_FACT", target_type="fact", target_id=fact_id, payload={"status": status})
     return {"factId": fact_id, "reviewStatus": status}
+
+
+@router.get("/patient/{patient_id}/curated", response_model=CuratedList)
+def get_curated_list(patient_id: str, kind: str = Query(..., alias="type", pattern="^(condition|medication)$")):
+    rows = list_curated(patient_id, kind)
+    return {"items": [CuratedItem.model_validate(r) for r in rows]}
+
+
+@router.post("/patient/{patient_id}/curated", response_model=CuratedItem)
+def create_curated(patient_id: str, body: CuratedCreate):
+    row = insert_curated(patient_id, body.model_dump())
+    if row is None:
+        raise HTTPException(status_code=500, detail="curated insert succeeded but row unreadable")
+    return CuratedItem.model_validate(row)
+
+
+@router.patch("/curated/{cid}", response_model=CuratedItem)
+def patch_curated(cid: str, body: CuratedPatch):
+    row = update_curated(cid, body.model_dump(exclude_unset=True))
+    if row is None:
+        raise HTTPException(status_code=404, detail="curated fact not found")
+    return CuratedItem.model_validate(row)
+
+
+@router.delete("/curated/{cid}")
+def delete_curated(cid: str):
+    row = set_record_state(cid, "dismissed")
+    if row is None:
+        raise HTTPException(status_code=404, detail="curated fact not found")
+    return {"id": cid, "recordState": "dismissed"}
+
+
+@router.post("/curated/{cid}/restore", response_model=CuratedItem)
+def restore_curated(cid: str):
+    row = set_record_state(cid, "active")
+    if row is None:
+        raise HTTPException(status_code=404, detail="curated fact not found")
+    return CuratedItem.model_validate(row)
 
 
 @router.get("/search")

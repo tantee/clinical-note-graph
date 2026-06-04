@@ -319,3 +319,96 @@ def propagate_curated_to_graph(patient_id: str, row: dict[str, Any]) -> None:
         neo4j_client.run_cypher(cypher, params)
     except Exception:  # noqa: BLE001
         logger.exception("curated graph propagation failed for %s", row.get("display_value"))
+
+
+# --- CRUD helpers (Task 7) ---------------------------------------------------
+
+# camelCase patch field -> curated column. Drives which columns a PATCH touches.
+PATCH_FIELD_TO_COLUMN: dict[str, str] = {
+    "displayValue": "display_value",
+    "startDate": "start_date",
+    "startQualifier": "start_qualifier",
+    "stopDate": "stop_date",
+    "stopQualifier": "stop_qualifier",
+    "startText": "start_text",
+    "stopText": "stop_text",
+    "scheduleText": "schedule_text",
+    "status": "status",
+}
+
+_UPDATE_STATE = text("""
+UPDATE curated_facts SET record_state = :state, updated_at = now()
+WHERE id = CAST(:cid AS uuid)
+""")
+
+
+def insert_curated(patient_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    """Manual human insert: origin=human, review_status=human_confirmed."""
+    code = payload.get("normalizedCode")
+    value = payload["displayValue"]
+    s_date, s_q, e_date, e_q = normalize_bounds(
+        payload.get("startDate"), payload.get("startQualifier"),
+        payload.get("stopDate"), payload.get("stopQualifier"),
+    )
+    row = {
+        "type": payload["type"],
+        "normalized_key": normalized_key(code, value),
+        "display_value": value,
+        "normalized_code": code,
+        "coding_system": payload.get("codingSystem"),
+        "start_date": s_date, "start_qualifier": s_q,
+        "stop_date": e_date, "stop_qualifier": e_q,
+        "start_text": payload.get("startText"), "stop_text": payload.get("stopText"),
+        "schedule_text": payload.get("scheduleText"), "status": payload.get("status"),
+        "record_state": "active", "review_status": "human_confirmed", "origin": "human",
+        "human_edited_fields": list(AI_FILLABLE_FIELDS),
+    }
+    with db_session() as s:
+        cid = _persist_merged(
+            s, patient_id=patient_id, existing=None, row=row, is_new=True,
+            evidence_fact_id=None, updated_by="human",
+        )
+    persisted = get_curated(cid)
+    if persisted:
+        propagate_curated_to_graph(patient_id, persisted)
+    return persisted
+
+
+def update_curated(cid: str, patch: dict[str, Any]) -> dict[str, Any] | None:
+    """Apply a partial edit. Touched columns join human_edited_fields; review flips
+    to human_confirmed. stop_qualifier=ongoing normalizes the stop date away."""
+    existing = get_curated(cid)
+    if existing is None:
+        return None
+    edited = set(existing.get("human_edited_fields") or [])
+    merged = dict(existing)
+    for field, col in PATCH_FIELD_TO_COLUMN.items():
+        if field in patch and patch[field] is not None:
+            merged[col] = patch[field]
+            edited.add(col)
+    s_date, s_q, e_date, e_q = normalize_bounds(
+        merged.get("start_date"), merged.get("start_qualifier"),
+        merged.get("stop_date"), merged.get("stop_qualifier"),
+    )
+    merged.update(start_date=s_date, start_qualifier=s_q, stop_date=e_date, stop_qualifier=e_q)
+    merged["review_status"] = "human_confirmed"
+    merged["human_edited_fields"] = sorted(edited)
+    with db_session() as s:
+        _persist_merged(
+            s, patient_id=existing.get("patient_id") or "", existing=existing,
+            row=merged, is_new=False, evidence_fact_id=existing.get("last_evidence_fact_id"),
+            updated_by="human",
+        )
+    persisted = get_curated(cid)
+    if persisted:
+        propagate_curated_to_graph(persisted.get("patient_id") or "", persisted)
+    return persisted
+
+
+def set_record_state(cid: str, state: str) -> dict[str, Any] | None:
+    existing = get_curated(cid)
+    if existing is None:
+        return None
+    with db_session() as s:
+        s.execute(_UPDATE_STATE, {"cid": cid, "state": state})
+    return get_curated(cid)
