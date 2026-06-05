@@ -1,4 +1,4 @@
-import { describe, expect, it, vi, beforeEach } from 'vitest'
+import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 
@@ -65,6 +65,8 @@ const stubs = {
 describe('CuratedPanel', () => {
   beforeEach(() => setActivePinia(createPinia()))
 
+  afterEach(() => vi.restoreAllMocks())
+
   it('lists items from the API with a rendered date range', async () => {
     const { getCurated } = await import('../src/api/client.js')
     getCurated.mockResolvedValue({ items: [ROW] })
@@ -80,6 +82,7 @@ describe('CuratedPanel', () => {
   })
 
   it('calls deleteCurated when a row is removed', async () => {
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
     const { getCurated, deleteCurated } = await import('../src/api/client.js')
     getCurated.mockResolvedValue({ items: [ROW] })
     deleteCurated.mockResolvedValue({ id: 'cur1', recordState: 'dismissed' })
@@ -92,6 +95,38 @@ describe('CuratedPanel', () => {
     await w.find('[data-test="curated-delete"]').trigger('click')
     await flushPromises()
     expect(deleteCurated).toHaveBeenCalledWith('cur1')
+  })
+
+  it('does not call deleteCurated when confirm is cancelled', async () => {
+    vi.spyOn(window, 'confirm').mockReturnValue(false)
+    const { getCurated, deleteCurated } = await import('../src/api/client.js')
+    getCurated.mockResolvedValue({ items: [ROW] })
+    deleteCurated.mockResolvedValue({ id: 'cur1', recordState: 'dismissed' })
+    const Panel = (await import('../src/components/CuratedPanel.vue')).default
+    const w = mount(Panel, {
+      props: { patientId: 'HN1', type: 'medication', title: 'Medications' },
+      global: { stubs, plugins: [createPinia()] },
+    })
+    await flushPromises()
+    await w.find('[data-test="curated-delete"]').trigger('click')
+    await flushPromises()
+    expect(deleteCurated).not.toHaveBeenCalled()
+  })
+
+  it('reloads when patientId prop changes', async () => {
+    const { getCurated } = await import('../src/api/client.js')
+    getCurated.mockResolvedValue({ items: [ROW] })
+    const Panel = (await import('../src/components/CuratedPanel.vue')).default
+    const w = mount(Panel, {
+      props: { patientId: 'HN1', type: 'medication', title: 'Medications' },
+      global: { stubs, plugins: [createPinia()] },
+    })
+    await flushPromises()
+    expect(getCurated).toHaveBeenCalledWith('HN1', 'medication', undefined)
+    getCurated.mockClear()
+    await w.setProps({ patientId: 'HN2' })
+    await flushPromises()
+    expect(getCurated).toHaveBeenCalledWith('HN2', 'medication', undefined)
   })
 
   it('submits a manual insert', async () => {

@@ -58,7 +58,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, onMounted, watch } from 'vue'
 import SectionHeader from './SectionHeader.vue'
 import EmptyState from './EmptyState.vue'
 import { REVIEW_META, FACT_TYPE_META } from '../constants/clinical.js'
@@ -151,6 +151,7 @@ async function save() {
 }
 
 async function remove(it) {
+  if (!window.confirm(`Remove "${it.displayValue}" from this list?`)) return
   try {
     await deleteCurated(it.id)
     await load()
@@ -161,5 +162,6 @@ async function remove(it) {
 }
 
 defineExpose({ form, save })
+watch(() => props.patientId, load)
 onMounted(load)
 </script>
