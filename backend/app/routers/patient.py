@@ -12,6 +12,7 @@ from app.schemas.coding import CodingSuggestRequest, CodingSuggestResponse, Summ
 from app.schemas.curated import CuratedCreate, CuratedItem, CuratedList, CuratedPatch
 from app.services.coding import suggest_coding
 from app.services.curated import (
+    CuratedIdentityConflict,
     insert_curated,
     list_curated,
     set_record_state,
@@ -428,7 +429,10 @@ def create_curated(patient_id: str, body: CuratedCreate):
 
 @router.patch("/curated/{cid}", response_model=CuratedItem)
 def patch_curated(cid: str, body: CuratedPatch):
-    row = update_curated(cid, body.model_dump(exclude_unset=True))
+    try:
+        row = update_curated(cid, body.model_dump(exclude_unset=True))
+    except CuratedIdentityConflict:
+        raise HTTPException(status_code=409, detail="another curated item already uses this identity")
     if row is None:
         raise HTTPException(status_code=404, detail="curated fact not found")
     return CuratedItem.model_validate(row)

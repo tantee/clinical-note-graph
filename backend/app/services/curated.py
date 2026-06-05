@@ -21,6 +21,10 @@ from app.schemas.extraction import ClinicalExtractionResult, MedicationChange, P
 
 logger = logging.getLogger(__name__)
 
+
+class CuratedIdentityConflict(Exception):
+    """Raised when a rename would collide with another curated row's identity."""
+
 # Curated columns the AI is allowed to populate/refresh. Order is irrelevant.
 AI_FILLABLE_FIELDS: tuple[str, ...] = (
     "display_value", "normalized_code", "coding_system",
@@ -198,6 +202,12 @@ def _to_dict(row) -> dict[str, Any]:
         d["human_edited_fields"] = json.loads(hef)
     elif hef is None:
         d["human_edited_fields"] = []
+    # Real Postgres returns date/datetime objects for date columns; coerce to
+    # ISO strings so the whole service layer is uniformly string-based (keeps
+    # FIX 1 change-detection correct and CuratedItem.startDate: str | None happy).
+    for k in ("start_date", "stop_date"):
+        if d.get(k) is not None:
+            d[k] = _iso_date(d[k])
     return d
 
 
@@ -215,6 +225,13 @@ def get_curated(cid: str) -> dict[str, Any] | None:
 
 def _persist_merged(s, *, patient_id: str, existing: dict | None, row: dict,
                     is_new: bool, evidence_fact_id: str | None, updated_by: str | None) -> str:
+    # FIX 3: always normalize bounds before persisting so that an AI re-mention
+    # with stopQualifier='ongoing' clears a previously-set stop_date, regardless
+    # of which call path (insert, update, reconcile) leads here.
+    s_date, s_q, e_date, e_q = normalize_bounds(
+        row.get("start_date"), row.get("start_qualifier"),
+        row.get("stop_date"), row.get("stop_qualifier"),
+    )
     payload = {
         "patient_id": patient_id,
         "type": row["type"],
@@ -222,10 +239,10 @@ def _persist_merged(s, *, patient_id: str, existing: dict | None, row: dict,
         "display_value": row["display_value"],
         "normalized_code": row.get("normalized_code"),
         "coding_system": row.get("coding_system"),
-        "start_date": row.get("start_date"),
-        "start_qualifier": row.get("start_qualifier") or "unknown",
-        "stop_date": row.get("stop_date"),
-        "stop_qualifier": row.get("stop_qualifier") or "unknown",
+        "start_date": s_date,
+        "start_qualifier": s_q,
+        "stop_date": e_date,
+        "stop_qualifier": e_q,
         "start_text": row.get("start_text"),
         "stop_text": row.get("stop_text"),
         "schedule_text": row.get("schedule_text"),
@@ -289,7 +306,8 @@ MERGE (c:Condition {patientId: $patientId, value: $value})
   SET c.onsetDate = $startDate, c.resolvedDate = $stopDate,
       c.startQualifier = $startQualifier, c.stopQualifier = $stopQualifier,
       c.status = coalesce($status, c.status),
-      c.curatedReviewStatus = $reviewStatus, c.lastSeen = datetime()
+      c.curatedReviewStatus = $reviewStatus,
+      c.curatedRecordState = $recordState, c.lastSeen = datetime()
 """
 
 _CYPHER_MEDICATION = """
@@ -298,7 +316,8 @@ MERGE (m:Medication {patientId: $patientId, name: $value})
   SET m.startDate = $startDate, m.stopDate = $stopDate,
       m.startQualifier = $startQualifier, m.stopQualifier = $stopQualifier,
       m.scheduleText = $scheduleText, m.lastAction = coalesce($status, m.lastAction),
-      m.curatedReviewStatus = $reviewStatus, m.lastSeen = datetime()
+      m.curatedReviewStatus = $reviewStatus,
+      m.curatedRecordState = $recordState, m.lastSeen = datetime()
 """
 
 
@@ -314,6 +333,7 @@ def propagate_curated_to_graph(patient_id: str, row: dict[str, Any]) -> None:
         "scheduleText": row.get("schedule_text"),
         "status": row.get("status"),
         "reviewStatus": row.get("review_status"),
+        "recordState": row.get("record_state"),
     }
     cypher = _CYPHER_CONDITION if row["type"] == "condition" else _CYPHER_MEDICATION
     try:
@@ -335,6 +355,13 @@ PATCH_FIELD_TO_COLUMN: dict[str, str] = {
     "stopText": "stop_text",
     "scheduleText": "schedule_text",
     "status": "status",
+}
+
+# Superset of PATCH_FIELD_TO_COLUMN including code fields available at create time.
+CREATE_FIELD_TO_COLUMN: dict[str, str] = {
+    **PATCH_FIELD_TO_COLUMN,
+    "normalizedCode": "normalized_code",
+    "codingSystem": "coding_system",
 }
 
 _UPDATE_STATE = text("""
@@ -362,7 +389,10 @@ def insert_curated(patient_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         "start_text": payload.get("startText"), "stop_text": payload.get("stopText"),
         "schedule_text": payload.get("scheduleText"), "status": payload.get("status"),
         "record_state": "active", "review_status": "human_confirmed", "origin": "human",
-        "human_edited_fields": list(AI_FILLABLE_FIELDS),
+        "human_edited_fields": sorted(
+            col for field, col in CREATE_FIELD_TO_COLUMN.items()
+            if payload.get(field) is not None
+        ),
     }
     with db_session() as s:
         cid = _persist_merged(
@@ -383,9 +413,10 @@ def update_curated(cid: str, patch: dict[str, Any]) -> dict[str, Any] | None:
         return None
     edited = set(existing.get("human_edited_fields") or [])
     merged = dict(existing)
+    # FIX 1: allow null clears (drop `is not None`); only mark ACTUALLY-changed fields.
     for field, col in PATCH_FIELD_TO_COLUMN.items():
-        if field in patch and patch[field] is not None:
-            merged[col] = patch[field]
+        if field in patch and patch[field] != merged.get(col):
+            merged[col] = patch[field]   # may be None -> clears the field
             edited.add(col)
     s_date, s_q, e_date, e_q = normalize_bounds(
         merged.get("start_date"), merged.get("start_qualifier"),
@@ -393,6 +424,15 @@ def update_curated(cid: str, patch: dict[str, Any]) -> dict[str, Any] | None:
     )
     merged.update(start_date=s_date, start_qualifier=s_q, stop_date=e_date, stop_qualifier=e_q)
     merged["normalized_key"] = normalized_key(merged.get("normalized_code"), merged["display_value"])
+    # FIX 5: pre-check for rename collision to avoid unique-index 500.
+    if merged["normalized_key"] != existing.get("normalized_key"):
+        with db_session() as s:
+            clash = s.execute(_SELECT_BY_IDENTITY, {
+                "pid": existing.get("patient_id"), "type": existing["type"],
+                "nk": merged["normalized_key"],
+            }).mappings().first()
+        if clash and str(clash["id"]) != str(cid):
+            raise CuratedIdentityConflict(merged["normalized_key"])
     merged["review_status"] = "human_confirmed"
     merged["human_edited_fields"] = sorted(edited)
     with db_session() as s:
@@ -413,4 +453,9 @@ def set_record_state(cid: str, state: str) -> dict[str, Any] | None:
         return None
     with db_session() as s:
         s.execute(_UPDATE_STATE, {"cid": cid, "state": state})
-    return get_curated(cid)
+    # FIX 4c: propagate the new record_state to the graph so dismissed nodes
+    # are correctly reflected in Neo4j.
+    persisted = get_curated(cid)
+    if persisted:
+        propagate_curated_to_graph(persisted.get("patient_id") or "", persisted)
+    return persisted

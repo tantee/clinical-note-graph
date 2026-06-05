@@ -73,3 +73,36 @@ def test_list_curated_returns_only_active(fake_store):
     items = list_curated("HN1", "condition")
     keys = {i["normalized_key"] for i in items}
     assert keys == {"x"}
+
+
+# ---- FIX 3 test: reconcile re-normalizes bounds via _persist_merged ---------
+
+def test_reconcile_ongoing_clears_stop_date_on_existing_row(fake_store, stub_neo4j):
+    """An AI mention with stopQualifier='ongoing' for a row that already has a
+    stop_date must clear stop_date (normalize_bounds applied inside _persist_merged).
+    (bug 010)"""
+    fake_store.patients["HN1"] = {"patient_id": "HN1"}
+    fake_store.curated_facts.append({
+        "id": "med1", "patient_id": "HN1", "type": "medication",
+        "normalized_key": "56946", "display_value": "paclitaxel",
+        "normalized_code": "56946", "coding_system": "RxNorm",
+        "start_date": "2025-09-01", "start_qualifier": "exact",
+        "stop_date": "2026-03-01", "stop_qualifier": "exact",
+        "start_text": None, "stop_text": None, "schedule_text": None,
+        "status": "start", "record_state": "active",
+        "review_status": "ai_suggested", "origin": "ai",
+        "human_edited_fields": [],  # nothing human-locked — AI may update
+        "last_evidence_fact_id": None,
+    })
+    ex = _extraction(medications=[
+        MedicationChange(
+            name="paclitaxel", rxNorm="56946", action="continue",
+            stopQualifier="ongoing",   # no stopDate provided
+        )
+    ])
+    reconcile_curated("HN1", ex)
+    row = next(r for r in fake_store.curated_facts if r["normalized_key"] == "56946")
+    assert row["stop_date"] is None, (
+        f"stop_date should be cleared when stopQualifier='ongoing', got {row['stop_date']!r}"
+    )
+    assert row["stop_qualifier"] == "ongoing"
