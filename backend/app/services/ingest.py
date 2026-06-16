@@ -14,6 +14,7 @@ from app.db.postgres import db_session
 from app.schemas.emr import EMRIngestRequest
 from app.schemas.extraction import ClinicalExtractionResult
 from app.services.ai_provider import get_ai_provider
+from app.services.curated import reconcile_curated
 from app.services.embeddings import embed_and_store_many
 from app.services.fhir_adapter import fhir_bundle_to_text, fhir_extract_patient
 from app.services.graph_updater import update_graph_for_document
@@ -119,6 +120,24 @@ VALUES (:patient_id, :encounter_id, :document_id, :type, :value, :normalized_cod
 """
 
 
+def _extra_date(value: Any) -> str | None:
+    """Coerce a datetime/date to an ISO *date* string for the evidence trail,
+    matching the curated layer's date-only representation. None -> None."""
+    if value is None:
+        return None
+    if hasattr(value, "date") and callable(value.date):   # datetime
+        return value.date().isoformat()
+    if hasattr(value, "isoformat"):                        # date
+        return value.isoformat()
+    return str(value)[:10] or None
+
+
+def _with_non_null(base: dict[str, Any], temporal: dict[str, Any]) -> dict[str, Any]:
+    """Merge the canonical temporal fields onto a base extra dict, dropping the
+    null ones so they don't bloat the evidence trail or blank an existing key."""
+    return {**base, **{k: v for k, v in temporal.items() if v is not None}}
+
+
 def _facts_rows(*, patient_id: str, encounter_id: str, document_id: str, ex: ClinicalExtractionResult) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
 
@@ -131,10 +150,27 @@ def _facts_rows(*, patient_id: str, encounter_id: str, document_id: str, ex: Cli
         })
 
     for p in ex.problems:
-        row("condition", p.value, p.normalizedCode, p.codingSystem, p.dateTime, p.evidenceText, p.confidence, p.extra)
+        # bug_020: carry the condition's temporality/severity into facts.extra so
+        # the evidence trail and rebuild_graph path retain them (additive — the
+        # AI's freeform p.extra still wins for any overlapping keys).
+        cond_extra = _with_non_null(p.extra or {}, {
+            "severity": p.severity, "status": p.status,
+            "onsetDate": _extra_date(p.onsetDate), "onsetQualifier": p.onsetQualifier,
+            "onsetText": p.onsetText,
+            "resolvedDate": _extra_date(p.resolvedDate), "resolvedQualifier": p.resolvedQualifier,
+            "resolvedText": p.resolvedText,
+        })
+        row("condition", p.value, p.normalizedCode, p.codingSystem, p.dateTime, p.evidenceText, p.confidence, cond_extra)
     for m in ex.medications:
         row("medication", m.name, m.rxNorm, "RxNorm" if m.rxNorm else None, None, m.evidenceText, m.confidence,
-            {"action": m.action, "dose": m.dose, "route": m.route, "frequency": m.frequency, "indication": m.indication})
+            _with_non_null(
+                {"action": m.action, "dose": m.dose, "route": m.route,
+                 "frequency": m.frequency, "indication": m.indication},
+                {"startDate": _extra_date(m.startDate), "startQualifier": m.startQualifier,
+                 "startText": m.startText,
+                 "stopDate": _extra_date(m.stopDate), "stopQualifier": m.stopQualifier,
+                 "stopText": m.stopText, "schedule": m.schedule},
+            ))
     for o in ex.observations:
         row("observation", f"{o.name}={o.value}{(' '+o.unit) if o.unit else ''}",
             o.loinc, "LOINC" if o.loinc else None, o.dateTime, o.evidenceText, o.confidence,
@@ -225,6 +261,14 @@ def _persist_post_extraction(*, patient: dict[str, Any], encounter: dict[str, An
             s.execute(text(_FACT_INSERT), rows)
         audit(s, action="FACTS_PERSISTED", target_type="document", target_id=document["documentId"],
               payload={"count": len(rows)})
+
+    # Reconcile AI mentions into the curated longitudinal layer. Best-effort:
+    # reconcile_curated isolates per-item failures internally.
+    if valid:
+        try:
+            reconcile_curated(patient["patientId"], extraction)
+        except Exception:
+            logger.exception("reconcile_curated failed (top-level); ingest unaffected")
 
 
 async def run_ingest_pipeline(

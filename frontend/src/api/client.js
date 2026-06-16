@@ -192,3 +192,20 @@ export const deletePricing = (model) =>
   api.delete(`/api/config/pricing/${encodeURIComponent(model)}`).then(data)
 export const refreshOpenRouter = () =>
   api.post('/api/config/pricing/refresh-openrouter').then(data)
+
+export const getCurated = (id, type, signal, state = 'active') =>
+  api.get(`/api/patient/${encodeURIComponent(id)}/curated`, {
+    params: { type, ...(state !== 'active' ? { state } : {}) }, signal,
+  }).then(data)
+
+export const createCurated = (id, body) =>
+  api.post(`/api/patient/${encodeURIComponent(id)}/curated`, body).then(data)
+
+export const updateCurated = (cid, body) =>
+  api.patch(`/api/curated/${encodeURIComponent(cid)}`, body).then(data)
+
+export const deleteCurated = (cid) =>
+  api.delete(`/api/curated/${encodeURIComponent(cid)}`).then(data)
+
+export const restoreCurated = (cid) =>
+  api.post(`/api/curated/${encodeURIComponent(cid)}/restore`).then(data)
