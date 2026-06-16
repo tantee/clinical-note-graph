@@ -782,6 +782,9 @@ def app_client(fake_store, stub_neo4j, isolated_vault, monkeypatch):
     # Disable workers in the TestClient lifespan so they don't race with
     # tests that mutate `fake_store.jobs` directly.
     monkeypatch.setenv("QUEUE_WORKERS", "0")
+    # No real Postgres in tests — skip the startup migration runner (it would
+    # try to connect to a DB and stall the lifespan).
+    monkeypatch.setenv("RUN_DB_MIGRATIONS", "0")
     # Always use the mock AI provider in unit/integration tests so no real API
     # calls are made (and evidence always comes back as an empty list, which is
     # valid for the CodingSuggestResponse schema).

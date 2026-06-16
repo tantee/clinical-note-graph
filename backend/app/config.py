@@ -53,6 +53,11 @@ class Settings(BaseSettings):
     CORS_ORIGINS: str = "*"  # comma-separated; "*" means "any" (dev only)
     API_KEY: str = ""  # if non-empty, X-API-Key is required on /api/emr|/api/config|/api/export|/api/facts
 
+    # Run pending SQL migrations (db/init/*.sql) on startup so existing Postgres
+    # volumes catch up on schema added after they were initialised. Disabled in
+    # the test suite (no real DB) the way QUEUE_WORKERS=0 disables workers.
+    RUN_DB_MIGRATIONS: bool = True
+
     # Async job queue
     QUEUE_WORKERS: int = 2
     JOB_LOCK_SECONDS: int = 120

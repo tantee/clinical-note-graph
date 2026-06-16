@@ -48,6 +48,7 @@ def test_protected_when_key_set(monkeypatch, fake_store):
     get_settings.cache_clear()
     monkeypatch.setenv("API_KEY", "secret")
     monkeypatch.setenv("QUEUE_WORKERS", "0")
+    monkeypatch.setenv("RUN_DB_MIGRATIONS", "0")
     from fastapi.testclient import TestClient
     from app.main import create_app
     with TestClient(create_app()) as c:

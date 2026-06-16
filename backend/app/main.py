@@ -28,6 +28,26 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     settings = get_settings()
     logging.basicConfig(level=settings.LOG_LEVEL.upper())
+
+    # Apply pending SQL migrations so existing Postgres volumes catch up on
+    # schema added after they were first initialised (docker-entrypoint-initdb.d
+    # only runs on a fresh volume). Retry while the DB is still coming up.
+    if settings.RUN_DB_MIGRATIONS:
+        from sqlalchemy import text as _sql_text
+        from app.db.migrations import run_migrations
+        from app.db.postgres import get_engine
+        for _ in range(12):
+            try:
+                with get_engine().connect() as _c:
+                    _c.execute(_sql_text("SELECT 1"))
+                break
+            except Exception:
+                await asyncio.sleep(2.5)
+        try:
+            await asyncio.to_thread(run_migrations)
+        except Exception as exc:
+            logger.error("SQL migrations did not complete at startup: %s", exc)
+
     last_err: Exception | None = None
     for attempt in range(12):
         try:
