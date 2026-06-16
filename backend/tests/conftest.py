@@ -570,6 +570,8 @@ class FakeStore:
                 rows = [r for r in rows if r["normalized_key"] == params.get("nk")]
             if "record_state = 'active'" in s:
                 rows = [r for r in rows if r.get("record_state") == "active"]
+            if "record_state = 'dismissed'" in s:
+                rows = [r for r in rows if r.get("record_state") == "dismissed"]
             if "order by display_value" in s:
                 rows = sorted(rows, key=lambda r: (r.get("display_value") or ""))
             return FakeResult([_copy(r) for r in rows])

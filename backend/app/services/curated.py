@@ -16,6 +16,7 @@ from typing import Any
 from sqlalchemy import text
 
 from app.db import neo4j_client
+from app.db.helpers import audit
 from app.db.postgres import db_session
 from app.schemas.extraction import ClinicalExtractionResult, MedicationChange, PatientFact
 
@@ -161,6 +162,12 @@ WHERE patient_id = :pid AND type = :type AND record_state = 'active'
 ORDER BY display_value ASC
 """)
 
+_SELECT_DISMISSED_BY_TYPE = text("""
+SELECT * FROM curated_facts
+WHERE patient_id = :pid AND type = :type AND record_state = 'dismissed'
+ORDER BY display_value ASC
+""")
+
 _SELECT_BY_ID = text("SELECT * FROM curated_facts WHERE id = CAST(:cid AS uuid)")
 
 _INSERT = text("""
@@ -211,9 +218,12 @@ def _to_dict(row) -> dict[str, Any]:
     return d
 
 
-def list_curated(patient_id: str, type_: str) -> list[dict[str, Any]]:
+def list_curated(patient_id: str, type_: str, state: str = "active") -> list[dict[str, Any]]:
+    """List curated rows for a patient by type. state='dismissed' returns the
+    dismissed rows (drives the Restore UI); anything else returns active rows."""
+    sql = _SELECT_DISMISSED_BY_TYPE if state == "dismissed" else _SELECT_ACTIVE_BY_TYPE
     with db_session() as s:
-        rows = s.execute(_SELECT_ACTIVE_BY_TYPE, {"pid": patient_id, "type": type_}).mappings().all()
+        rows = s.execute(sql, {"pid": patient_id, "type": type_}).mappings().all()
     return [_to_dict(r) for r in rows]
 
 
@@ -321,6 +331,41 @@ MERGE (m:Medication {patientId: $patientId, name: $value})
 """
 
 
+# Node key property per type — Condition is keyed on `value`, Medication on `name`.
+_NODE_KEY: dict[str, tuple[str, str]] = {
+    "condition": ("Condition", "value"),
+    "medication": ("Medication", "name"),
+}
+
+
+def _relabel_cypher(label: str, prop: str) -> str:
+    # Rename the curated node in place when no node already holds the new value
+    # (edges follow the node, so the evidence trail is preserved). If a node at
+    # the new value already exists, that one is canonical and the stale old node
+    # is removed — either way the graph never keeps an orphan after a rename.
+    return f"""
+MATCH (old:{label} {{patientId: $patientId, {prop}: $oldValue}})
+OPTIONAL MATCH (dup:{label} {{patientId: $patientId, {prop}: $newValue}})
+FOREACH (_ IN CASE WHEN dup IS NULL THEN [1] ELSE [] END | SET old.{prop} = $newValue)
+WITH old, dup
+WHERE dup IS NOT NULL
+DETACH DELETE old
+"""
+
+
+def relabel_curated_node(patient_id: str, type_: str, old_value: str, new_value: str) -> None:
+    """Move/cleanup the Neo4j node when a curated item is renamed so the old
+    display value doesn't linger as an orphan. Best-effort."""
+    if not old_value or old_value == new_value or type_ not in _NODE_KEY:
+        return
+    label, prop = _NODE_KEY[type_]
+    params = {"patientId": patient_id, "oldValue": old_value, "newValue": new_value}
+    try:
+        neo4j_client.run_cypher(_relabel_cypher(label, prop), params)
+    except Exception:  # noqa: BLE001
+        logger.exception("curated graph relabel failed for %s -> %s", old_value, new_value)
+
+
 def propagate_curated_to_graph(patient_id: str, row: dict[str, Any]) -> None:
     """Push curated values into the matching Neo4j node. Best-effort."""
     params = {
@@ -399,6 +444,9 @@ def insert_curated(patient_id: str, payload: dict[str, Any]) -> dict[str, Any]:
             s, patient_id=patient_id, existing=None, row=row, is_new=True,
             evidence_fact_id=None, updated_by="human",
         )
+        audit(s, actor="human", action="CURATED_CREATE", target_type="curated_fact",
+              target_id=cid, payload={"patientId": patient_id, "type": row["type"],
+                                      "displayValue": value})
     persisted = get_curated(cid)
     if persisted:
         propagate_curated_to_graph(patient_id, persisted)
@@ -412,12 +460,14 @@ def update_curated(cid: str, patch: dict[str, Any]) -> dict[str, Any] | None:
     if existing is None:
         return None
     edited = set(existing.get("human_edited_fields") or [])
+    changed: list[str] = []
     merged = dict(existing)
     # FIX 1: allow null clears (drop `is not None`); only mark ACTUALLY-changed fields.
     for field, col in PATCH_FIELD_TO_COLUMN.items():
         if field in patch and patch[field] != merged.get(col):
             merged[col] = patch[field]   # may be None -> clears the field
             edited.add(col)
+            changed.append(col)
     s_date, s_q, e_date, e_q = normalize_bounds(
         merged.get("start_date"), merged.get("start_qualifier"),
         merged.get("stop_date"), merged.get("stop_qualifier"),
@@ -441,6 +491,15 @@ def update_curated(cid: str, patch: dict[str, Any]) -> dict[str, Any] | None:
             row=merged, is_new=False, evidence_fact_id=existing.get("last_evidence_fact_id"),
             updated_by="human",
         )
+        audit(s, actor="human", action="CURATED_UPDATE", target_type="curated_fact",
+              target_id=str(cid), payload={"patientId": existing.get("patient_id"),
+                                           "changed": sorted(changed)})
+    # graph-orphan: a rename leaves the old display-value node behind unless we
+    # move/cleanup it before re-propagating the curated values to the new node.
+    old_value = existing.get("display_value")
+    new_value = merged["display_value"]
+    if old_value != new_value:
+        relabel_curated_node(existing.get("patient_id") or "", existing["type"], old_value, new_value)
     persisted = get_curated(cid)
     if persisted:
         propagate_curated_to_graph(persisted.get("patient_id") or "", persisted)
@@ -453,6 +512,10 @@ def set_record_state(cid: str, state: str) -> dict[str, Any] | None:
         return None
     with db_session() as s:
         s.execute(_UPDATE_STATE, {"cid": cid, "state": state})
+        audit(s, actor="human",
+              action="CURATED_DISMISS" if state == "dismissed" else "CURATED_RESTORE",
+              target_type="curated_fact", target_id=str(cid),
+              payload={"patientId": existing.get("patient_id"), "recordState": state})
     # FIX 4c: propagate the new record_state to the graph so dismissed nodes
     # are correctly reflected in Neo4j.
     persisted = get_curated(cid)

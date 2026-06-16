@@ -120,6 +120,24 @@ VALUES (:patient_id, :encounter_id, :document_id, :type, :value, :normalized_cod
 """
 
 
+def _extra_date(value: Any) -> str | None:
+    """Coerce a datetime/date to an ISO *date* string for the evidence trail,
+    matching the curated layer's date-only representation. None -> None."""
+    if value is None:
+        return None
+    if hasattr(value, "date") and callable(value.date):   # datetime
+        return value.date().isoformat()
+    if hasattr(value, "isoformat"):                        # date
+        return value.isoformat()
+    return str(value)[:10] or None
+
+
+def _with_non_null(base: dict[str, Any], temporal: dict[str, Any]) -> dict[str, Any]:
+    """Merge the canonical temporal fields onto a base extra dict, dropping the
+    null ones so they don't bloat the evidence trail or blank an existing key."""
+    return {**base, **{k: v for k, v in temporal.items() if v is not None}}
+
+
 def _facts_rows(*, patient_id: str, encounter_id: str, document_id: str, ex: ClinicalExtractionResult) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
 
@@ -132,10 +150,27 @@ def _facts_rows(*, patient_id: str, encounter_id: str, document_id: str, ex: Cli
         })
 
     for p in ex.problems:
-        row("condition", p.value, p.normalizedCode, p.codingSystem, p.dateTime, p.evidenceText, p.confidence, p.extra)
+        # bug_020: carry the condition's temporality/severity into facts.extra so
+        # the evidence trail and rebuild_graph path retain them (additive — the
+        # AI's freeform p.extra still wins for any overlapping keys).
+        cond_extra = _with_non_null(p.extra or {}, {
+            "severity": p.severity, "status": p.status,
+            "onsetDate": _extra_date(p.onsetDate), "onsetQualifier": p.onsetQualifier,
+            "onsetText": p.onsetText,
+            "resolvedDate": _extra_date(p.resolvedDate), "resolvedQualifier": p.resolvedQualifier,
+            "resolvedText": p.resolvedText,
+        })
+        row("condition", p.value, p.normalizedCode, p.codingSystem, p.dateTime, p.evidenceText, p.confidence, cond_extra)
     for m in ex.medications:
         row("medication", m.name, m.rxNorm, "RxNorm" if m.rxNorm else None, None, m.evidenceText, m.confidence,
-            {"action": m.action, "dose": m.dose, "route": m.route, "frequency": m.frequency, "indication": m.indication})
+            _with_non_null(
+                {"action": m.action, "dose": m.dose, "route": m.route,
+                 "frequency": m.frequency, "indication": m.indication},
+                {"startDate": _extra_date(m.startDate), "startQualifier": m.startQualifier,
+                 "startText": m.startText,
+                 "stopDate": _extra_date(m.stopDate), "stopQualifier": m.stopQualifier,
+                 "stopText": m.stopText, "schedule": m.schedule},
+            ))
     for o in ex.observations:
         row("observation", f"{o.name}={o.value}{(' '+o.unit) if o.unit else ''}",
             o.loinc, "LOINC" if o.loinc else None, o.dateTime, o.evidenceText, o.confidence,

@@ -30,6 +30,28 @@
     </v-list>
     <EmptyState v-else icon="mdi-tray" :title="`No ${title.toLowerCase()} yet`" />
 
+    <v-divider />
+    <div class="px-2 py-1">
+      <v-btn size="x-small" variant="text"
+             :prepend-icon="showDismissed ? 'mdi-chevron-up' : 'mdi-chevron-down'"
+             data-test="curated-toggle-dismissed" @click="toggleDismissed">
+        {{ showDismissed ? 'Hide dismissed' : 'Show dismissed' }}
+      </v-btn>
+    </div>
+    <v-list v-if="showDismissed && dismissed.length" density="compact">
+      <v-list-item v-for="it in dismissed" :key="it.id">
+        <v-list-item-title class="text-medium-emphasis text-decoration-line-through">
+          {{ it.displayValue }}
+        </v-list-item-title>
+        <v-list-item-subtitle>{{ formatDateRange(it) }}</v-list-item-subtitle>
+        <template #append>
+          <v-btn icon="mdi-restore" size="x-small" variant="text" color="primary"
+                 data-test="curated-restore" aria-label="Restore" @click="restore(it)" />
+        </template>
+      </v-list-item>
+    </v-list>
+    <EmptyState v-else-if="showDismissed" icon="mdi-tray-remove" title="No dismissed items" />
+
     <v-dialog v-model="dialog" max-width="520">
       <v-card>
         <SectionHeader :title="isNew ? `Add ${singular}` : `Edit ${singular}`" icon="mdi-pencil-outline" />
@@ -65,7 +87,7 @@ import { REVIEW_META, FACT_TYPE_META } from '../constants/clinical.js'
 import { formatDateRange } from '../utils/dateRange.js'
 import { useUiStore } from '../stores/ui.js'
 import {
-  getCurated, createCurated, updateCurated, deleteCurated,
+  getCurated, createCurated, updateCurated, deleteCurated, restoreCurated,
 } from '../api/client.js'
 
 const props = defineProps({
@@ -79,6 +101,8 @@ const STOP_QUALIFIERS = ['exact', 'estimated', 'ongoing', 'unknown']
 
 const ui = useUiStore()
 const items = ref([])
+const dismissed = ref([])
+const showDismissed = ref(false)
 const dialog = ref(false)
 const isNew = ref(true)
 const editingId = ref(null)
@@ -98,6 +122,27 @@ function emptyForm() {
 async function load() {
   const res = await getCurated(props.patientId, props.type, undefined)
   items.value = res.items || []
+  if (showDismissed.value) await loadDismissed()
+}
+
+async function loadDismissed() {
+  const res = await getCurated(props.patientId, props.type, undefined, 'dismissed')
+  dismissed.value = res.items || []
+}
+
+async function toggleDismissed() {
+  showDismissed.value = !showDismissed.value
+  if (showDismissed.value) await loadDismissed()
+}
+
+async function restore(it) {
+  try {
+    await restoreCurated(it.id)
+    await load()
+    ui.success('Restored')
+  } catch {
+    ui.error('Restore failed')
+  }
 }
 
 function openAdd() {

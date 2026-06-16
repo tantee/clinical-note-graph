@@ -148,6 +148,28 @@ describe('CuratedPanel', () => {
     }))
   })
 
+  it('loads dismissed items and restores one', async () => {
+    const { getCurated, restoreCurated } = await import('../src/api/client.js')
+    const DISMISSED = { ...ROW, id: 'curD', displayValue: 'Old med', recordState: 'dismissed' }
+    // active load (first call) returns the active row; dismissed load returns the dismissed one
+    getCurated.mockImplementation((id, type, signal, state) =>
+      Promise.resolve({ items: state === 'dismissed' ? [DISMISSED] : [ROW] }))
+    restoreCurated.mockResolvedValue({ ...DISMISSED, recordState: 'active' })
+    const Panel = (await import('../src/components/CuratedPanel.vue')).default
+    const w = mount(Panel, {
+      props: { patientId: 'HN1', type: 'medication', title: 'Medications' },
+      global: { stubs, plugins: [createPinia()] },
+    })
+    await flushPromises()
+    await w.find('[data-test="curated-toggle-dismissed"]').trigger('click')
+    await flushPromises()
+    expect(getCurated).toHaveBeenCalledWith('HN1', 'medication', undefined, 'dismissed')
+    expect(w.text()).toContain('Old med')
+    await w.find('[data-test="curated-restore"]').trigger('click')
+    await flushPromises()
+    expect(restoreCurated).toHaveBeenCalledWith('curD')
+  })
+
   it('submits an edit via updateCurated without type', async () => {
     const { getCurated, updateCurated } = await import('../src/api/client.js')
     getCurated.mockResolvedValue({ items: [ROW] })

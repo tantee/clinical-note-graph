@@ -414,8 +414,12 @@ def review_fact(fact_id: str, status: str = Query(..., pattern="^(human_confirme
 
 
 @router.get("/patient/{patient_id}/curated", response_model=CuratedList)
-def get_curated_list(patient_id: str, kind: str = Query(..., alias="type", pattern="^(condition|medication)$")):
-    rows = list_curated(patient_id, kind)
+def get_curated_list(
+    patient_id: str,
+    kind: str = Query(..., alias="type", pattern="^(condition|medication)$"),
+    state: str = Query("active", pattern="^(active|dismissed)$"),
+):
+    rows = list_curated(patient_id, kind, state)
     return {"items": [CuratedItem.model_validate(r) for r in rows]}
 
 

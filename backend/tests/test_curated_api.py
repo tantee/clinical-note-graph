@@ -250,6 +250,86 @@ def test_patch_rename_collision_returns_409(app_client, patient, fake_store, stu
     )
 
 
+# ---- bug_016: curated CRUD writes audit_log entries -------------------------
+
+def test_create_writes_audit_entry(app_client, patient, fake_store, stub_neo4j):
+    r = app_client.post(f"/api/patient/{patient}/curated", json={
+        "type": "condition", "displayValue": "Hypertension",
+    })
+    assert r.status_code == 200, r.text
+    cid = r.json()["id"]
+    entries = [e for e in fake_store.audit_log if e["action"] == "CURATED_CREATE"]
+    assert len(entries) == 1, fake_store.audit_log
+    e = entries[0]
+    assert e["actor"] == "human"
+    assert e["target_type"] == "curated_fact"
+    assert e["target_id"] == cid
+    assert e["payload"]["patientId"] == "HN1"
+
+
+def test_update_writes_audit_entry(app_client, patient, fake_store, stub_neo4j):
+    fake_store.curated_facts.append(_base_condition("audU", start_date=None))
+    r = app_client.patch("/api/curated/audU", json={"startDate": "2025-12-25"})
+    assert r.status_code == 200, r.text
+    entries = [e for e in fake_store.audit_log if e["action"] == "CURATED_UPDATE"]
+    assert len(entries) == 1, fake_store.audit_log
+    e = entries[0]
+    assert e["actor"] == "human"
+    assert e["target_id"] == "audU"
+    assert "start_date" in e["payload"]["changed"]
+
+
+def test_dismiss_and_restore_write_audit_entries(app_client, patient, fake_store, stub_neo4j):
+    fake_store.curated_facts.append(_base_condition("audD"))
+    app_client.delete("/api/curated/audD")
+    app_client.post("/api/curated/audD/restore")
+    actions = [e["action"] for e in fake_store.audit_log if e["target_id"] == "audD"]
+    assert "CURATED_DISMISS" in actions
+    assert "CURATED_RESTORE" in actions
+
+
+# ---- graph-orphan: rename removes/relabels the stale Neo4j node -------------
+
+def test_rename_codeless_relabels_old_graph_node(app_client, patient, fake_store, stub_neo4j):
+    """Renaming a code-less curated item must not leave the old-value node behind:
+    a relabel/cleanup Cypher carrying the old + new value is emitted."""
+    fake_store.curated_facts.append(_base_condition(
+        "renG", display_value="high blood pressure",
+        normalized_key="high blood pressure",
+    ))
+    r = app_client.patch("/api/curated/renG", json={"displayValue": "Hypertension"})
+    assert r.status_code == 200, r.text
+    relabel = [
+        (q, p) for q, p in stub_neo4j
+        if p.get("oldValue") == "high blood pressure" and p.get("newValue") == "Hypertension"
+    ]
+    assert relabel, f"expected a relabel/cleanup cypher for the rename, got {list(stub_neo4j)}"
+
+
+def test_no_relabel_when_display_value_unchanged(app_client, patient, fake_store, stub_neo4j):
+    fake_store.curated_facts.append(_base_condition("renN", start_date=None))
+    app_client.patch("/api/curated/renN", json={"startDate": "2025-01-01"})
+    relabel = [(q, p) for q, p in stub_neo4j if "oldValue" in p]
+    assert not relabel, "no relabel cypher should run when the name did not change"
+
+
+# ---- Restore UI support: list dismissed items -------------------------------
+
+def test_list_dismissed_items(app_client, patient, fake_store, stub_neo4j):
+    fake_store.curated_facts.append(_base_condition(
+        "dis1", display_value="Old problem", record_state="dismissed",
+    ))
+    fake_store.curated_facts.append(_base_condition(
+        "act1", display_value="Active problem", normalized_key="active problem",
+        record_state="active",
+    ))
+    r = app_client.get(f"/api/patient/{patient}/curated",
+                       params={"type": "condition", "state": "dismissed"})
+    assert r.status_code == 200, r.text
+    items = r.json()["items"]
+    assert [it["displayValue"] for it in items] == ["Old problem"]
+
+
 # ---- Hardening: real-PG date objects coerced to ISO strings -----------------
 
 def test_get_curated_coerces_date_objects_to_iso_strings(fake_store):
