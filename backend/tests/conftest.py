@@ -426,6 +426,20 @@ class FakeStore:
                 if ver is not None:
                     rows = [d for d in rows if d.get("version") == ver]
             return FakeResult(rows)
+        # Curated recovery: valid extraction outputs for a patient, oldest first.
+        if "from ai_outputs" in s and "call_type = 'extract'" in s and "valid = true" in s:
+            rows = [
+                r for r in self.ai_outputs
+                if r.get("patient_id") == params.get("pid")
+                and r.get("call_type") == "extract" and r.get("valid")
+            ]
+            rows.sort(key=lambda r: str(r.get("created_at") or ""))
+            return FakeResult([
+                {"document_id": r.get("document_id"), "raw_output": r.get("raw_output"),
+                 "created_at": r.get("created_at")}
+                for r in rows
+            ])
+
         # Aggregations on ai_outputs — summary + per-model + per-day.
         # These must fire BEFORE the generic `from ai_outputs` branch below.
         if "from ai_outputs" in s and "count(*)" in s and "filter (where error" in s:
