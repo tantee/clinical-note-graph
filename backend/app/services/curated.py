@@ -189,6 +189,15 @@ _SELECT_ALL_BY_PATIENT = text("""
 SELECT * FROM curated_facts WHERE patient_id = :pid
 """)
 
+# Recovery: the AI extractions that were persisted at ingest time, oldest first.
+# raw_output validates back into a ClinicalExtractionResult, so reconcile can be
+# replayed without re-calling the model.
+_SELECT_VALID_EXTRACTIONS = text("""
+SELECT document_id, raw_output, created_at FROM ai_outputs
+WHERE patient_id = :pid AND call_type = 'extract' AND valid = true
+ORDER BY created_at ASC
+""")
+
 _INSERT = text("""
 INSERT INTO curated_facts (
     patient_id, type, normalized_key, display_value, normalized_code, coding_system,
@@ -342,6 +351,40 @@ def reconcile_curated(patient_id: str, extraction: ClinicalExtractionResult) -> 
             propagate_curated_to_graph(patient_id, merged)
         except Exception:  # noqa: BLE001 — resilience matches graph-write behavior
             logger.exception("curated reconcile failed for %s", ai.get("normalized_key"))
+
+
+def reconcile_curated_from_history(patient_id: str) -> dict[str, int]:
+    """Rebuild the curated layer from stored AI extractions, no AI call.
+
+    Recovery for patients ingested before `curated_facts` existed (reconcile
+    failed silently then). Replays the most recent valid extraction per document
+    through `reconcile_curated`, oldest document first — mirroring the
+    `/graph/rebuild` recovery path. Returns counts of documents replayed and
+    extractions skipped as unparseable."""
+    with db_session() as s:
+        rows = s.execute(_SELECT_VALID_EXTRACTIONS, {"pid": patient_id}).mappings().all()
+    # Most recent extraction per document (ASC order -> last write wins).
+    latest_by_doc: dict[str, Any] = {}
+    order: list[str] = []
+    for r in rows:
+        doc = r.get("document_id") or ""
+        if doc not in latest_by_doc:
+            order.append(doc)
+        latest_by_doc[doc] = r
+    documents = 0
+    skipped = 0
+    for doc in order:
+        raw = latest_by_doc[doc]["raw_output"]
+        if isinstance(raw, str):
+            raw = json.loads(raw)
+        try:
+            extraction = ClinicalExtractionResult.model_validate(raw)
+        except Exception:  # noqa: BLE001 — a non-extraction or stale shape is skipped
+            skipped += 1
+            continue
+        reconcile_curated(patient_id, extraction)
+        documents += 1
+    return {"documents": documents, "skipped": skipped}
 
 
 # --- Neo4j propagation -------------------------------------------------------
