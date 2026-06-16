@@ -279,6 +279,11 @@ def rebuild_graph(patient_id: str) -> dict[str, Any]:
             continue
         per_doc.append({"documentId": d["document_id"], "counts": counts})
 
+    # Replay the curated layer so the rebuilt graph reflects human curation
+    # (renames, dismissals) instead of diverging back to the AI's raw extraction.
+    from app.services.curated import apply_curated_to_graph
+    apply_curated_to_graph(patient_id)
+
     return {"documents": len(documents), "perDocument": per_doc, "wiped": wiped}
 
 

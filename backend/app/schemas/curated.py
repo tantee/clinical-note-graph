@@ -31,6 +31,7 @@ class CuratedItem(BaseModel):
     reviewStatus: str = Field(validation_alias="review_status")
     origin: str
     humanEditedFields: list[str] = Field(default_factory=list, validation_alias="human_edited_fields")
+    aliases: list[str] = Field(default_factory=list)
 
 
 class CuratedList(BaseModel):

@@ -549,8 +549,9 @@ class FakeStore:
         if s.startswith("insert into curated_facts"):
             row = dict(params)
             row["id"] = f"curated-{len(self.curated_facts) + 1}"
-            hef = row.get("human_edited_fields")
-            row["human_edited_fields"] = json.loads(hef) if isinstance(hef, str) else (hef or [])
+            for jcol in ("human_edited_fields", "aliases"):
+                v = row.get(jcol)
+                row[jcol] = json.loads(v) if isinstance(v, str) else (v or [])
             self.curated_facts.append(row)
             return FakeResult([{"id": row["id"]}])
 
@@ -558,11 +559,24 @@ class FakeStore:
             def _copy(r):
                 c = dict(r)
                 c["human_edited_fields"] = list(r.get("human_edited_fields") or [])
+                c["aliases"] = list(r.get("aliases") or [])
                 return c
 
             if "id = cast(:cid as uuid)" in s:
                 rows = [r for r in self.curated_facts if str(r["id"]) == str(params.get("cid"))]
                 return FakeResult([_copy(r) for r in rows])
+            # Identity OR alias lookup (reconcile re-link): match by normalized_key
+            # or any alias (case-insensitive), exact-key first, limit 1.
+            if "jsonb_array_elements_text" in s:
+                nk = params.get("nk")
+                matched = [
+                    r for r in self.curated_facts
+                    if r["patient_id"] == params.get("pid") and r["type"] == params.get("type")
+                    and (r["normalized_key"] == nk
+                         or any(str(a).lower() == nk for a in (r.get("aliases") or [])))
+                ]
+                matched.sort(key=lambda r: 0 if r["normalized_key"] == nk else 1)
+                return FakeResult([_copy(r) for r in matched[:1]])
             rows = [r for r in self.curated_facts if r["patient_id"] == params.get("pid")]
             if "type = :type" in s:
                 rows = [r for r in rows if r["type"] == params.get("type")]
@@ -586,7 +600,7 @@ class FakeStore:
                     for k, v in params.items():
                         if k == "cid":
                             continue
-                        if k == "human_edited_fields":
+                        if k in ("human_edited_fields", "aliases"):
                             v = json.loads(v) if isinstance(v, str) else (v or [])
                         target[k] = v
             return FakeResult([])
