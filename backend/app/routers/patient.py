@@ -15,6 +15,7 @@ from app.services.curated import (
     CuratedIdentityConflict,
     insert_curated,
     list_curated,
+    reconcile_curated_from_history,
     set_record_state,
     update_curated,
 )
@@ -416,6 +417,24 @@ def review_fact(fact_id: str, status: str = Query(..., pattern="^(human_confirme
         )
         audit(s, actor="human", action="REVIEW_FACT", target_type="fact", target_id=fact_id, payload={"status": status})
     return {"factId": fact_id, "reviewStatus": status}
+
+
+@router.post("/patient/{patient_id}/curated/reconcile")
+def reconcile_curated_recovery(patient_id: str) -> dict[str, Any]:
+    """Rebuild the curated layer from stored AI extractions (no AI call).
+
+    Recovery for patients ingested before `curated_facts` existed, whose curated
+    Problems/Medications panels are empty even though the raw AI facts populated.
+    """
+    with db_session() as s:
+        patient_row = s.execute(
+            text("SELECT * FROM patients WHERE patient_id = :pid"),
+            {"pid": patient_id},
+        ).mappings().first()
+    if not patient_row:
+        raise HTTPException(status_code=404, detail=f"Patient {patient_id} not found")
+    result = reconcile_curated_from_history(patient_id)
+    return {"patientId": patient_id, **result}
 
 
 @router.get("/patient/{patient_id}/curated", response_model=CuratedList)
