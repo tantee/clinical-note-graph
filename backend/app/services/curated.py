@@ -130,6 +130,7 @@ def merge_curated(
             "review_status": "ai_suggested",
             "origin": "ai",
             "human_edited_fields": [],
+            "aliases": [],
         }
         for f in AI_FILLABLE_FIELDS:
             row[f] = ai.get(f)
@@ -170,17 +171,35 @@ ORDER BY display_value ASC
 
 _SELECT_BY_ID = text("SELECT * FROM curated_facts WHERE id = CAST(:cid AS uuid)")
 
+# Identity lookup that also matches a row whose `aliases` carry the key (a prior
+# name). Exact normalized_key matches rank first; alias matches re-link a
+# re-mention of an old name to the row it was renamed into. Compared
+# case-insensitively because aliases store original-case display values while
+# the incoming key is already lower-cased.
+_SELECT_BY_IDENTITY_OR_ALIAS = text("""
+SELECT * FROM curated_facts
+WHERE patient_id = :pid AND type = :type
+  AND (normalized_key = :nk
+       OR EXISTS (SELECT a FROM jsonb_array_elements_text(aliases) AS a WHERE lower(a) = :nk))
+ORDER BY (normalized_key = :nk) DESC, created_at ASC
+LIMIT 1
+""")
+
+_SELECT_ALL_BY_PATIENT = text("""
+SELECT * FROM curated_facts WHERE patient_id = :pid
+""")
+
 _INSERT = text("""
 INSERT INTO curated_facts (
     patient_id, type, normalized_key, display_value, normalized_code, coding_system,
     start_date, start_qualifier, stop_date, stop_qualifier, start_text, stop_text,
     schedule_text, status, record_state, review_status, origin,
-    human_edited_fields, last_evidence_fact_id, updated_by
+    human_edited_fields, aliases, last_evidence_fact_id, updated_by
 ) VALUES (
     :patient_id, :type, :normalized_key, :display_value, :normalized_code, :coding_system,
     :start_date, :start_qualifier, :stop_date, :stop_qualifier, :start_text, :stop_text,
     :schedule_text, :status, :record_state, :review_status, :origin,
-    CAST(:human_edited_fields AS jsonb), :last_evidence_fact_id, :updated_by
+    CAST(:human_edited_fields AS jsonb), CAST(:aliases AS jsonb), :last_evidence_fact_id, :updated_by
 )
 RETURNING id
 """)
@@ -194,6 +213,7 @@ UPDATE curated_facts SET
     stop_qualifier = :stop_qualifier, start_text = :start_text, stop_text = :stop_text,
     schedule_text = :schedule_text, status = :status, record_state = :record_state,
     review_status = :review_status, human_edited_fields = CAST(:human_edited_fields AS jsonb),
+    aliases = CAST(:aliases AS jsonb),
     last_evidence_fact_id = :last_evidence_fact_id, updated_by = :updated_by,
     updated_at = now()
 WHERE id = CAST(:cid AS uuid)
@@ -209,6 +229,11 @@ def _to_dict(row) -> dict[str, Any]:
         d["human_edited_fields"] = json.loads(hef)
     elif hef is None:
         d["human_edited_fields"] = []
+    al = d.get("aliases")
+    if isinstance(al, str):
+        d["aliases"] = json.loads(al)
+    elif al is None:
+        d["aliases"] = []
     # Real Postgres returns date/datetime objects for date columns; coerce to
     # ISO strings so the whole service layer is uniformly string-based (keeps
     # FIX 1 change-detection correct and CuratedItem.startDate: str | None happy).
@@ -261,6 +286,7 @@ def _persist_merged(s, *, patient_id: str, existing: dict | None, row: dict,
         "review_status": row.get("review_status", "ai_suggested"),
         "origin": row.get("origin", "ai"),
         "human_edited_fields": json.dumps(row.get("human_edited_fields") or []),
+        "aliases": json.dumps(row.get("aliases") or []),
         "last_evidence_fact_id": evidence_fact_id,
         "updated_by": updated_by,
     }
@@ -286,19 +312,33 @@ def reconcile_curated(patient_id: str, extraction: ClinicalExtractionResult) -> 
 
     for ai in ai_items:
         try:
+            ai_value = ai.get("display_value")
             with db_session() as s:
+                # Match by identity OR alias: a re-mention of a name the row was
+                # renamed away from re-links here instead of minting a duplicate.
                 existing_row = s.execute(
-                    _SELECT_BY_IDENTITY,
+                    _SELECT_BY_IDENTITY_OR_ALIAS,
                     {"pid": patient_id, "type": ai["type"], "nk": ai["normalized_key"]},
                 ).mappings().first()
                 existing = _to_dict(existing_row) if existing_row else None
                 resurface = bool(existing) and existing.get("record_state") == "dismissed"
                 merged, is_new = merge_curated(existing, ai, resurface=resurface)
+                # When the human-locked display differs from the AI's value, the
+                # AI value is a prior/alternate name for this row: record it so a
+                # future re-mention re-links, and collapse its stale graph node.
+                old_value = ai_value if ai_value and ai_value != merged["display_value"] else None
+                if old_value:
+                    aliases = list(merged.get("aliases") or [])
+                    if old_value not in aliases:
+                        aliases.append(old_value)
+                    merged["aliases"] = aliases
                 cid = _persist_merged(
                     s, patient_id=patient_id, existing=existing, row=merged,
                     is_new=is_new, evidence_fact_id=None, updated_by="ai",
                 )
             merged["id"] = cid
+            if old_value:
+                relabel_curated_node(patient_id, ai["type"], old_value, merged["display_value"])
             propagate_curated_to_graph(patient_id, merged)
         except Exception:  # noqa: BLE001 — resilience matches graph-write behavior
             logger.exception("curated reconcile failed for %s", ai.get("normalized_key"))
@@ -385,6 +425,26 @@ def propagate_curated_to_graph(patient_id: str, row: dict[str, Any]) -> None:
         neo4j_client.run_cypher(cypher, params)
     except Exception:  # noqa: BLE001
         logger.exception("curated graph propagation failed for %s", row.get("display_value"))
+
+
+def apply_curated_to_graph(patient_id: str) -> None:
+    """Replay the whole curated layer onto the patient's graph.
+
+    Used as a post-pass after `rebuild_graph` repopulates nodes from the raw
+    `facts` rows (which still carry the AI's original text). For every curated
+    row we relabel any node carrying a prior name (alias) onto the curated
+    display value, then propagate the curated values — so the rebuilt graph
+    reflects human curation (renames, dismissals) instead of diverging back to
+    what the AI first extracted. Best-effort and isolated per row."""
+    with db_session() as s:
+        rows = s.execute(_SELECT_ALL_BY_PATIENT, {"pid": patient_id}).mappings().all()
+    for r in (_to_dict(r) for r in rows):
+        try:
+            for alias in r.get("aliases") or []:
+                relabel_curated_node(patient_id, r["type"], alias, r["display_value"])
+            propagate_curated_to_graph(patient_id, r)
+        except Exception:  # noqa: BLE001
+            logger.exception("curated graph replay failed for %s", r.get("display_value"))
 
 
 # --- CRUD helpers (Task 7) ---------------------------------------------------
@@ -485,6 +545,16 @@ def update_curated(cid: str, patch: dict[str, Any]) -> dict[str, Any] | None:
             raise CuratedIdentityConflict(merged["normalized_key"])
     merged["review_status"] = "human_confirmed"
     merged["human_edited_fields"] = sorted(edited)
+    # A rename records the prior display value as an alias — the bridge that lets
+    # reconcile re-link a future re-mention of the old name and lets the graph
+    # post-pass collapse stale old-value nodes.
+    old_value = existing.get("display_value")
+    new_value = merged["display_value"]
+    if old_value and old_value != new_value:
+        aliases = list(merged.get("aliases") or [])
+        if old_value not in aliases:
+            aliases.append(old_value)
+        merged["aliases"] = aliases
     with db_session() as s:
         _persist_merged(
             s, patient_id=existing.get("patient_id") or "", existing=existing,
@@ -496,8 +566,6 @@ def update_curated(cid: str, patch: dict[str, Any]) -> dict[str, Any] | None:
                                            "changed": sorted(changed)})
     # graph-orphan: a rename leaves the old display-value node behind unless we
     # move/cleanup it before re-propagating the curated values to the new node.
-    old_value = existing.get("display_value")
-    new_value = merged["display_value"]
     if old_value != new_value:
         relabel_curated_node(existing.get("patient_id") or "", existing["type"], old_value, new_value)
     persisted = get_curated(cid)
