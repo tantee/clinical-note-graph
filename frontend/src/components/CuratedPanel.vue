@@ -14,6 +14,7 @@
         <v-list-item-subtitle>
           {{ formatDateRange(it) }}
           <span v-if="it.scheduleText"> · {{ it.scheduleText }}</span>
+          <span v-if="it.normalizedCode" data-test="curated-code"> · {{ codeLabel(it) }}</span>
         </v-list-item-subtitle>
         <template #append>
           <v-chip size="x-small" variant="tonal"
@@ -111,6 +112,10 @@ const meta = (s) => REVIEW_META[s] || { color: 'grey', icon: 'mdi-help-circle-ou
 const icon = FACT_TYPE_META[props.type]?.icon || 'mdi-clipboard-text'
 const color = FACT_TYPE_META[props.type]?.color || 'primary'
 const singular = props.type === 'medication' ? 'medication' : 'problem'
+
+function codeLabel(it) {
+  return `${it.codingSystem || 'code'}: ${it.normalizedCode}`
+}
 
 function emptyForm() {
   return {

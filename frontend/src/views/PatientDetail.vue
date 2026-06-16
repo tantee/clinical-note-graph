@@ -72,22 +72,9 @@
           </v-col>
         </v-row>
         <v-row>
-          <v-col cols="12" md="6">
-            <FactCard
-              title="Active problems" icon="mdi-medical-bag" color="deep-orange"
-              :items="patient?.problems || []" empty="No problems extracted yet"
-              :title-fn="(p) => p.value" :code-fn="(p) => p.normalized_code && `${p.coding_system}: ${p.normalized_code}`"
-              :status-fn="(p) => p.review_status"
-            />
-          </v-col>
-          <v-col cols="12" md="6">
-            <FactCard
-              title="Medications" icon="mdi-pill" color="green"
-              :items="patient?.medications || []" empty="No medications yet"
-              :title-fn="(m) => m.value" :code-fn="(m) => m.extra?.action"
-              :status-fn="(m) => m.review_status"
-            />
-          </v-col>
+          <!-- Problems & Medications are shown by the curated panels above (the
+               canonical, editable longitudinal list). The raw per-fact AI
+               extraction with codes/evidence lives on the "EMR vs facts" tab. -->
           <v-col cols="12" md="6">
             <FactCard
               title="Recent observations" icon="mdi-chart-line" color="cyan"
