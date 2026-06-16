@@ -81,6 +81,33 @@ describe('CuratedPanel', () => {
     expect(w.text()).toContain('2026-01-10 → ongoing')
   })
 
+  it('shows the coding chip when a row has a normalized code', async () => {
+    const { getCurated } = await import('../src/api/client.js')
+    getCurated.mockResolvedValue({ items: [
+      { ...ROW, id: 'curC', displayValue: 'Appendicitis', type: 'condition',
+        normalizedCode: 'K35.80', codingSystem: 'ICD10' },
+    ] })
+    const Panel = (await import('../src/components/CuratedPanel.vue')).default
+    const w = mount(Panel, {
+      props: { patientId: 'HN1', type: 'condition', title: 'Problems' },
+      global: { stubs, plugins: [createPinia()] },
+    })
+    await flushPromises()
+    expect(w.text()).toContain('ICD10: K35.80')
+  })
+
+  it('omits the coding chip when a row has no code', async () => {
+    const { getCurated } = await import('../src/api/client.js')
+    getCurated.mockResolvedValue({ items: [{ ...ROW, normalizedCode: null, codingSystem: null }] })
+    const Panel = (await import('../src/components/CuratedPanel.vue')).default
+    const w = mount(Panel, {
+      props: { patientId: 'HN1', type: 'medication', title: 'Medications' },
+      global: { stubs, plugins: [createPinia()] },
+    })
+    await flushPromises()
+    expect(w.find('[data-test="curated-code"]').exists()).toBe(false)
+  })
+
   it('calls deleteCurated when a row is removed', async () => {
     vi.spyOn(window, 'confirm').mockReturnValue(true)
     const { getCurated, deleteCurated } = await import('../src/api/client.js')
